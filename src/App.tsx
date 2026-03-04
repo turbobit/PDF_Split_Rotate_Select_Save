@@ -1,7 +1,7 @@
 import { join } from "@tauri-apps/api/path";
 import { message, open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { PDFDocument, degrees } from "pdf-lib";
 import {
   GlobalWorkerOptions,
@@ -26,6 +26,8 @@ const THUMB_CACHE_LIMIT = 420;
 const ZOOM_MIN = 25;
 const ZOOM_MAX = 400;
 const ZOOM_STEP = 10;
+const APP_VERSION = "0.1.1";
+const PROJECT_REPO_URL = "https://github.com/turbobit/pdf_split";
 
 type SaveType = "pdf" | "png" | "jpg";
 type Locale = "ko" | "en";
@@ -212,6 +214,7 @@ function App() {
   const [status, setStatus] = useState<StatusState>({ type: "ready" });
   const [errorText, setErrorText] = useState<string | null>(null);
   const [toastText, setToastText] = useState<string | null>(null);
+  const [showHelpInfo, setShowHelpInfo] = useState(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<number, string>>({});
@@ -1169,6 +1172,14 @@ function App() {
     else await handleSaveImages(saveType);
   }, [pdfDoc, pdfBytes, selectedPageNumbers.length, saveType, handleSavePdf, handleSaveImages, tr]);
 
+  const openProjectRepo = useCallback(async () => {
+    try {
+      await openUrl(PROJECT_REPO_URL);
+    } catch (error) {
+      setErrorText(`${tr("링크 열기 실패", "Failed to open link")}: ${formatError(error)}`);
+    }
+  }, [tr]);
+
   const totalThumbHeight = pageOrder.length * THUMB_ITEM_HEIGHT;
 
   return (
@@ -1304,6 +1315,33 @@ function App() {
           <div className="action-group toolbar-block status-inline">
             <span>{statusText}</span>
             <span>{tr("선택", "Selected")} {selectedPageNumbers.length} / {tr("전체", "Total")} {pageCount}</span>
+          </div>
+
+          <div
+            className={`help-wrap ${showHelpInfo ? "open" : ""}`}
+            onMouseEnter={() => setShowHelpInfo(true)}
+            onMouseLeave={() => setShowHelpInfo(false)}
+          >
+            <button
+              className="help-btn"
+              type="button"
+              onClick={() => setShowHelpInfo((prev) => !prev)}
+              aria-label={tr("프로젝트 정보", "Project info")}
+              title={tr("프로젝트 정보", "Project info")}
+            >
+              ?
+            </button>
+            <div className="help-popover">
+              <strong>{tr("프로젝트 정보", "Project Info")}</strong>
+              <p>{tr("로컬 고성능 PDF 선택/병합/회전/저장 도구", "Local high-performance PDF split/merge/rotate/save tool")}</p>
+              <p>{tr("버전", "Version")}: v{APP_VERSION}</p>
+              <p className="help-link-row">
+                <span>Git:</span>
+                <button type="button" className="help-link-btn" onClick={() => void openProjectRepo()}>
+                  {PROJECT_REPO_URL}
+                </button>
+              </p>
+            </div>
           </div>
         </div>
       </section>

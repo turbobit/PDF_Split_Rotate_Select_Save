@@ -69,11 +69,13 @@ input {
 }
 
 .toolbar-row {
+  position: relative;
   padding: 6px 8px;
   display: flex;
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+  padding-right: 42px;
 }
 
 .action-group {
@@ -103,6 +105,82 @@ input {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.help-wrap {
+  position: absolute;
+  right: 8px;
+  top: 6px;
+  z-index: 30;
+}
+
+.help-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.help-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent-2);
+}
+
+.help-popover {
+  position: absolute;
+  right: 0;
+  top: 30px;
+  width: min(420px, calc(100vw - 24px));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffdf8;
+  color: var(--ink);
+  box-shadow: 0 14px 22px rgba(32, 24, 17, 0.2);
+  display: none;
+}
+
+.help-wrap:hover .help-popover,
+.help-wrap.open .help-popover {
+  display: block;
+}
+
+.help-popover strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.help-popover p {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.help-link-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.help-link-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent-2);
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  font-size: 12px;
+}
+
+.help-link-btn:hover {
+  text-decoration: underline;
 }
 
 .primary-btn,
@@ -570,5 +648,15 @@ input:disabled {
   .status-inline {
     margin-left: 0;
     white-space: normal;
+  }
+
+  .help-wrap {
+    position: static;
+    margin-left: auto;
+  }
+
+  .help-popover {
+    right: auto;
+    left: 0;
   }
 }
