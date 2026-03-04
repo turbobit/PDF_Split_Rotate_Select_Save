@@ -1,0 +1,23 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="96" y1="96" x2="928" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF9A45"/>
+      <stop offset="1" stop-color="#D14D1E"/>
+    </linearGradient>
+    <filter id="shadow" x="120" y="120" width="784" height="784" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#7A2B10" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="96" y="96" width="832" height="832" rx="184" fill="url(#bg)"/>
+  <g filter="url(#shadow)">
+    <path d="M322 252H578L726 400V772H322V252Z" fill="#FFF7F1"/>
+    <path d="M578 252V400H726" fill="#FFD8C0"/>
+    <path d="M578 252V400H726" stroke="#E48A5D" stroke-width="24" stroke-linejoin="round"/>
+    <path d="M322 252H578L726 400V772H322V252Z" stroke="#F6C2A2" stroke-width="24" stroke-linejoin="round"/>
+    <rect x="484" y="338" width="20" height="354" rx="10" fill="#D14D1E"/>
+    <path d="M432 640L560 520" stroke="#D14D1E" stroke-width="24" stroke-linecap="round"/>
+    <path d="M432 520L560 640" stroke="#D14D1E" stroke-width="24" stroke-linecap="round"/>
+    <circle cx="404" cy="675" r="46" fill="none" stroke="#D14D1E" stroke-width="22"/>
+    <circle cx="588" cy="675" r="46" fill="none" stroke="#D14D1E" stroke-width="22"/>
+  </g>
+</svg>
