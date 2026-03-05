@@ -211,6 +211,7 @@ function App() {
   const [mergeDropPath, setMergeDropPath] = useState<string | null>(null);
   const [mergeDraggingIndex, setMergeDraggingIndex] = useState<number | null>(null);
   const [mergeInsertPosition, setMergeInsertPosition] = useState<"front" | "back" | "beforeActive" | "afterActive">("back");
+  const mergeListRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<StatusState>({ type: "ready" });
   const [errorText, setErrorText] = useState<string | null>(null);
   const [toastText, setToastText] = useState<string | null>(null);
@@ -622,6 +623,36 @@ function App() {
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    if (mergeDraggingIndex === null) return;
+    const move = (event: MouseEvent) => {
+      const listElement = mergeListRef.current;
+      if (!listElement) return;
+      const rect = listElement.getBoundingClientRect();
+      const relativeY = event.clientY - rect.top + listElement.scrollTop;
+      // 첫 번째 merge-item의 실제 높이를 가져와서 사용
+      const firstItem = listElement.querySelector('.merge-item') as HTMLElement;
+      const itemHeight = firstItem ? firstItem.offsetHeight : 32; // 기본값 32px
+      const rawIndex = Math.floor(relativeY / itemHeight);
+      const targetIndex = clamp(rawIndex, 0, Math.max(0, mergePdfPaths.length - 1));
+      if (targetIndex === mergeDraggingIndex) return;
+      moveMergePdfPathByIndex(mergeDraggingIndex, targetIndex);
+      setMergeDraggingIndex(targetIndex);
+      setMergeDropPath(mergePdfPaths[targetIndex] ?? null);
+    };
+    const stop = () => {
+      setMergeDropPath(null);
+      setMergeDraggingPath(null);
+      setMergeDraggingIndex(null);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+    };
+  }, [mergeDraggingIndex, mergePdfPaths, moveMergePdfPathByIndex]);
 
   const handleApplyMergePdfs = useCallback(async () => {
     if (mergePdfPaths.length === 0) return;
@@ -1501,42 +1532,27 @@ function App() {
                 {tr("현재 뒤", "After current")}
               </label>
             </div>
-            <div className="merge-list">
+            <div className="merge-list" ref={mergeListRef}>
               {mergePdfPaths.map((path, index) => (
                 <article
                   key={path}
                   className={`merge-item ${mergeDraggingPath === path ? "dragging" : ""} ${mergeDropPath === path ? "drop-target" : ""}`}
-                  draggable={!isAddingPdf}
-                  onDragStart={(event) => {
-                    if (isAddingPdf) return;
-                    setMergeDraggingPath(path);
-                    setMergeDraggingIndex(index);
-                    setMergeDropPath(null);
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/plain", path);
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                  }}
-                  onDragEnter={(event) => {
-                    event.preventDefault();
-                    if (mergeDraggingIndex === null || mergeDraggingIndex === index) return;
-                    moveMergePdfPathByIndex(mergeDraggingIndex, index);
-                    setMergeDraggingIndex(index);
-                    setMergeDropPath(path);
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    setMergeDropPath(null);
-                    setMergeDraggingPath(null);
-                    setMergeDraggingIndex(null);
-                  }}
-                  onDragEnd={() => {
-                    setMergeDropPath(null);
-                    setMergeDraggingPath(null);
-                    setMergeDraggingIndex(null);
-                  }}
                 >
+                  <span
+                    className="merge-drag-handle"
+                    title={tr("여기를 잡고 드래그하여 순서 이동", "Drag here to reorder")}
+                    aria-label={tr("드래그 핸들", "Drag handle")}
+                    onMouseDown={(event) => {
+                      if (isAddingPdf) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setMergeDraggingPath(path);
+                      setMergeDraggingIndex(index);
+                      setMergeDropPath(null);
+                    }}
+                  >
+                    |||
+                  </span>
                   <span className="merge-index">{index + 1}</span>
                   <span className="merge-name">{normalizeFileStem(path)}</span>
                 </article>

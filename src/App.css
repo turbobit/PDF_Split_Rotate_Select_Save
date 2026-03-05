@@ -596,7 +596,6 @@ input:disabled {
   border-radius: 8px;
   background: #fff;
   padding: 6px 8px;
-  cursor: move;
 }
 
 .merge-item.dragging {
@@ -617,6 +616,31 @@ input:disabled {
   background: var(--surface-soft);
   color: var(--muted);
   font-size: 11px;
+}
+
+.merge-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 1px;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+}
+
+.merge-item.dragging .merge-drag-handle {
+  cursor: grabbing;
+}
+
+.merge-item.dragging {
+  cursor: grabbing;
 }
 
 .merge-name {
