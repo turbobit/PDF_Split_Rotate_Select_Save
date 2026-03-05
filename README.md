@@ -30,6 +30,7 @@ Desktop app built with Tauri + React for fast local PDF split, reorder, rotate, 
 
 - Node.js 18+ (or newer LTS)
 - Rust toolchain (for Tauri desktop build)
+- GitHub CLI (`gh`) installed and authenticated (`gh auth login`)
 
 ## Development
 
@@ -61,6 +62,12 @@ Build desktop app:
 
 ```bash
 npm run tauri build
+```
+
+Build and publish GitHub Release (create/update by `package.json` version tag):
+
+```bash
+npm run release
 ```
 
 ## Project Structure
