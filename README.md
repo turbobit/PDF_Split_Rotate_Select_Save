@@ -1,26 +1,21 @@
-# PDF Split and Reorder Tool
+# PDF Split Rotate Select Save
 
-Desktop app built with Tauri + React for fast local PDF page extraction and reordering.
+Desktop app built with Tauri + React for fast local PDF split, reorder, rotate, merge, and export workflows.
 
 <img  alt="image" src="https://github.com/user-attachments/assets/214043cd-2b4a-4394-b6ef-111a3515e244" />
 
 ## Features
 
 - Open a PDF and preview pages with virtualized thumbnails.
-- Select pages by:
-  - Checkbox
-  - Quick range input (`1,3,5-9`)
-  - Range add/remove controls
+- Select pages by checkbox, quick input (`1,3,5-9`), and range add/remove controls.
 - Reorder pages by drag and drop in the thumbnail list.
 - Remove a page from selection using the trash action beside each thumbnail checkbox.
 - Rotate pages (left/right) before export.
 - Zoom preview (`-`, `+`, fit).
-- Add another PDF into the current document:
-  - Insert to front or back
-  - Choose source pages by range input (`1-3, 5, 9`)
-- Export selected pages as:
-  - PDF (`<source>_<UUID>_selected.pdf`)
-  - PNG/JPG (one file per selected page)
+- Add another PDF into the current document (front/back) with optional page range input (`1-3, 5, 9`).
+- Merge multiple PDFs with drag-and-drop merge order and insert position options (front/back/before current/after current).
+- Export selected pages as PDF (`<source>_<UUID>_selected.pdf`) or PNG/JPG (one file per selected page).
+- Optional "open explorer after save" behavior.
 - Korean/English UI language toggle.
 
 ## Tech Stack
@@ -79,6 +74,7 @@ npm run tauri build
 - All PDF processing is local on your machine.
 - Very large PDFs are handled with thumbnail virtualization and queue-based rendering.
 - Reordered thumbnail order is used when exporting selected pages.
+- Per-page rotation is applied to PDF and image export output.
 
 ## Korean README
 
