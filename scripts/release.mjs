@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,15 @@ function run(command, options = {}) {
     shell: true,
     ...options,
   });
+}
+
+function runCapture(command) {
+  return execSync(command, {
+    cwd: rootDir,
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: true,
+    encoding: "utf8",
+  }).trim();
 }
 
 function runQuiet(command) {
@@ -50,6 +59,76 @@ function quotePath(pathValue) {
   return `"${pathValue.replaceAll('"', '\\"')}"`;
 }
 
+function quoteArg(value) {
+  return `"${String(value).replaceAll('"', '\\"')}"`;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getPreviousTag(currentTag) {
+  try {
+    const output = runCapture("git tag --sort=version:refname");
+    if (!output) return null;
+    const tags = output.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    const currentIndex = tags.lastIndexOf(currentTag);
+    if (currentIndex <= 0) return null;
+    return tags[currentIndex - 1];
+  } catch {
+    return null;
+  }
+}
+
+function getCommitLines(previousTag, currentTag) {
+  try {
+    const range = previousTag ? `${previousTag}..HEAD` : "";
+    const command = range
+      ? `git log ${range} --pretty=format:%s`
+      : "git log -n 15 --pretty=format:%s";
+    const output = runCapture(command);
+    if (!output) return [];
+    const lines = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return previousTag
+      ? lines
+      : lines.filter((line) => !new RegExp(`^${escapeRegex(currentTag)}\\b`).test(line));
+  } catch {
+    return [];
+  }
+}
+
+function buildKoreanReleaseNotes({ tag, previousTag, commits, artifacts }) {
+  const date = new Date().toISOString().slice(0, 10);
+  const compareLine = previousTag
+    ? `- 변경 범위: \`${previousTag} -> ${tag}\``
+    : "- 변경 범위: 이전 태그를 찾지 못해 최근 커밋 기준으로 생성";
+  const commitSection = commits.length > 0
+    ? commits.map((line) => `- ${line}`).join("\n")
+    : "- 커밋 메시지 기반 변경 내역을 찾지 못했습니다.";
+  const assetSection = artifacts.map((pathValue) => `- ${pathValue.split(/[\\/]/).pop()}`).join("\n");
+  return [
+    `## ${tag} 릴리스 노트`,
+    "",
+    "### 요약",
+    "- PDF Split Rotate Select Save 데스크톱 앱 배포",
+    `- 릴리스 날짜: ${date}`,
+    compareLine,
+    "",
+    "### 주요 변경사항",
+    commitSection,
+    "",
+    "### 포함된 빌드 산출물",
+    assetSection,
+    "",
+    "### 참고",
+    "- 실행 환경: Tauri 2 + React + TypeScript",
+    "- 모든 PDF 처리 작업은 로컬에서 수행됩니다.",
+  ].join("\n");
+}
+
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 
 const version = packageJson.version;
@@ -59,7 +138,7 @@ if (!version) {
 }
 
 const tag = `v${version}`;
-const releaseTitle = `PDF Split Rotate Select Save ${tag}`;
+const releaseTitle = `PDF Split Rotate Select Save ${tag} 릴리스`;
 
 console.log(`[release] Building desktop bundles for ${tag}...`);
 run("npm run tauri build");
@@ -77,14 +156,30 @@ for (const artifact of artifacts) {
 
 console.log(`[release] Checking for existing GitHub release: ${tag}`);
 const hasRelease = runQuiet(`gh release view ${tag}`);
+const previousTag = getPreviousTag(tag);
+const commitLines = getCommitLines(previousTag, tag);
+const notes = buildKoreanReleaseNotes({
+  tag,
+  previousTag,
+  commits: commitLines,
+  artifacts,
+});
+
+const notesFilePath = join(rootDir, ".release-notes.tmp.md");
+writeFileSync(notesFilePath, notes, "utf8");
 
 const artifactArgs = artifacts.map(quotePath).join(" ");
-if (hasRelease) {
-  console.log(`[release] Release ${tag} exists. Uploading assets with --clobber...`);
-  run(`gh release upload ${tag} ${artifactArgs} --clobber`);
-} else {
-  console.log(`[release] Creating release ${tag} and uploading assets...`);
-  run(`gh release create ${tag} ${artifactArgs} --title ${quotePath(releaseTitle)} --generate-notes`);
+try {
+  if (hasRelease) {
+    console.log(`[release] Release ${tag} exists. Updating title/notes and uploading assets...`);
+    run(`gh release edit ${tag} --title ${quoteArg(releaseTitle)} --notes-file ${quotePath(notesFilePath)}`);
+    run(`gh release upload ${tag} ${artifactArgs} --clobber`);
+  } else {
+    console.log(`[release] Creating release ${tag} and uploading assets...`);
+    run(`gh release create ${tag} ${artifactArgs} --title ${quoteArg(releaseTitle)} --notes-file ${quotePath(notesFilePath)}`);
+  }
+} finally {
+  if (existsSync(notesFilePath)) unlinkSync(notesFilePath);
 }
 
 console.log(`[release] Done: ${tag}`);
