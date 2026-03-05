@@ -1,8 +1,8 @@
 import { join } from "@tauri-apps/api/path";
-import { message, open, save } from "@tauri-apps/plugin-dialog";
+import { ask, message, open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { PDFDocument, degrees } from "pdf-lib";
+import { PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, type PDFRef, degrees } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
@@ -11,7 +11,7 @@ import {
   type RenderTask,
 } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { type KeyboardEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
@@ -23,6 +23,12 @@ const THUMB_OVERSCAN = 10;
 const THUMB_PREFETCH = 14;
 const THUMBNAIL_CONCURRENCY = 3;
 const THUMB_CACHE_LIMIT = 420;
+const OUTLINE_MAX_DEPTH = 4;
+const OUTLINE_TEXT_CANDIDATE_LIMIT = 80;
+const OUTLINE_LOAD_TIMEOUT_MS = 4500;
+const OUTLINE_SAVE_WAIT_TIMEOUT_MS = 5000;
+const OUTLINE_SAVE_WAIT_POLL_MS = 120;
+const PREVIEW_TEXT_SPAN_LIMIT = 2600;
 const ZOOM_MIN = 25;
 const ZOOM_MAX = 400;
 const ZOOM_STEP = 10;
@@ -31,6 +37,8 @@ const PROJECT_REPO_URL = "https://github.com/turbobit/PDF_Split_Rotate_Select_Sa
 
 type SaveType = "pdf" | "png" | "jpg";
 type Locale = "ko" | "en";
+type SidebarTab = "thumbnails" | "outline";
+type OutlinePanelMode = "view" | "edit";
 type StatusState =
   | { type: "ready" }
   | { type: "loadingPdf" }
@@ -40,6 +48,55 @@ type StatusState =
   | { type: "savingImages"; done: number; total: number }
   | { type: "savedImages"; total: number }
   | { type: "failed"; reason: "pdfLoad" | "pdfSave" | "imageSave" };
+
+type OutlineEntrySource = "pdf" | "text" | "manual";
+
+type OutlineEntry = {
+  id: string;
+  title: string;
+  pageNumber: number;
+  depth: number;
+  source: OutlineEntrySource;
+};
+
+type PdfOutlineNode = {
+  title: string;
+  dest: string | Array<unknown> | null;
+  items: PdfOutlineNode[];
+};
+
+type PdfPageRefLike = {
+  num: number;
+  gen: number;
+};
+
+type TextItemLike = {
+  str: string;
+};
+
+type OutlineTreeNode = {
+  title: string;
+  pageNumber: number;
+  children: OutlineTreeNode[];
+};
+
+type PreviewTextSpan = {
+  id: string;
+  text: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  angleDeg: number;
+};
+
+type PreviewSelectionRect = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
 
 function detectLocale(): Locale {
   const saved = window.localStorage.getItem("app.locale");
@@ -108,6 +165,261 @@ function createExportUuid(): string {
   const randomPart = Math.random().toString(16).slice(2);
   const timePart = Date.now().toString(16);
   return `${timePart}-${randomPart}`;
+}
+
+function createOutlineEntryId(): string {
+  return `outline-${createExportUuid()}`;
+}
+
+function normalizeOutlineDepth(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return clamp(Math.floor(value), 0, OUTLINE_MAX_DEPTH);
+}
+
+function normalizeOutlineTitle(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isPdfPageRefLike(value: unknown): value is PdfPageRefLike {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Record<string, unknown>;
+  return typeof target.num === "number" && typeof target.gen === "number";
+}
+
+function isTextItemLike(value: unknown): value is TextItemLike {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Record<string, unknown>;
+  return typeof target.str === "string";
+}
+
+type RichTextItemLike = TextItemLike & {
+  transform: number[];
+  width: number;
+  height: number;
+};
+
+function isRichTextItemLike(value: unknown): value is RichTextItemLike {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Record<string, unknown>;
+  return typeof target.str === "string"
+    && Array.isArray(target.transform)
+    && target.transform.length >= 6
+    && typeof target.width === "number"
+    && typeof target.height === "number";
+}
+
+function multiplyTransform(m1: number[], m2: number[]): [number, number, number, number, number, number] {
+  const a = m1[0] * m2[0] + m1[2] * m2[1];
+  const b = m1[1] * m2[0] + m1[3] * m2[1];
+  const c = m1[0] * m2[2] + m1[2] * m2[3];
+  const d = m1[1] * m2[2] + m1[3] * m2[3];
+  const e = m1[0] * m2[4] + m1[2] * m2[5] + m1[4];
+  const f = m1[1] * m2[4] + m1[3] * m2[5] + m1[5];
+  return [a, b, c, d, e, f];
+}
+
+function buildPreviewTextSpans(
+  textItems: unknown[],
+  viewportTransform: number[],
+  viewportScale: number,
+): PreviewTextSpan[] {
+  const spans: PreviewTextSpan[] = [];
+  let index = 0;
+  for (const item of textItems) {
+    if (!isRichTextItemLike(item)) continue;
+    const text = item.str;
+    if (text.trim().length === 0) continue;
+    const tx = multiplyTransform(viewportTransform, item.transform);
+    const fontHeight = Math.max(7, Math.hypot(tx[2], tx[3]));
+    const width = Math.max(2, Math.abs(item.width * viewportScale));
+    const height = Math.max(fontHeight, Math.abs(item.height * viewportScale));
+    const left = tx[4];
+    const top = tx[5] - height;
+    const angleDeg = (Math.atan2(tx[1], tx[0]) * 180) / Math.PI;
+    spans.push({
+      id: `span-${index}`,
+      text,
+      left,
+      top,
+      width,
+      height,
+      fontSize: fontHeight,
+      angleDeg,
+    });
+    index += 1;
+    if (spans.length >= PREVIEW_TEXT_SPAN_LIMIT) break;
+  }
+  return spans;
+}
+
+function normalizeSelectionRect(rect: PreviewSelectionRect): { left: number; top: number; right: number; bottom: number } {
+  return {
+    left: Math.min(rect.x1, rect.x2),
+    top: Math.min(rect.y1, rect.y2),
+    right: Math.max(rect.x1, rect.x2),
+    bottom: Math.max(rect.y1, rect.y2),
+  };
+}
+
+async function resolveOutlinePageNumber(
+  doc: PDFDocumentProxy,
+  destination: string | Array<unknown> | null,
+): Promise<number | null> {
+  let resolvedDestination: Array<unknown> | null = null;
+  if (typeof destination === "string") {
+    resolvedDestination = await doc.getDestination(destination);
+  } else if (Array.isArray(destination)) {
+    resolvedDestination = destination;
+  }
+  if (!resolvedDestination || resolvedDestination.length === 0) return null;
+  const target = resolvedDestination[0];
+  if (isPdfPageRefLike(target)) {
+    const pageIndex = await doc.getPageIndex(target);
+    return pageIndex + 1;
+  }
+  if (typeof target === "number" && Number.isFinite(target)) return target + 1;
+  return null;
+}
+
+async function flattenPdfOutlineNodes(
+  doc: PDFDocumentProxy,
+  nodes: PdfOutlineNode[],
+  depth: number,
+  entries: OutlineEntry[],
+): Promise<void> {
+  for (const node of nodes) {
+    const title = normalizeOutlineTitle(node.title ?? "");
+    const pageNumber = await resolveOutlinePageNumber(doc, node.dest);
+    if (title.length > 0 && pageNumber !== null && pageNumber > 0 && pageNumber <= doc.numPages) {
+      entries.push({
+        id: createOutlineEntryId(),
+        title,
+        pageNumber,
+        depth: normalizeOutlineDepth(depth),
+        source: "pdf",
+      });
+    }
+    if (Array.isArray(node.items) && node.items.length > 0) {
+      await flattenPdfOutlineNodes(doc, node.items, depth + 1, entries);
+    }
+  }
+}
+
+async function extractOutlineCandidatesFromText(
+  doc: PDFDocumentProxy,
+): Promise<Array<{ title: string; pageNumber: number }>> {
+  const candidates: Array<{ title: string; pageNumber: number }> = [];
+  const seen = new Set<string>();
+  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+    const page = await doc.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const tokens = textContent.items
+      .map((item) => (isTextItemLike(item) ? normalizeOutlineTitle(item.str) : ""))
+      .filter((token) => token.length > 0);
+    if (tokens.length === 0) continue;
+    const preferred = tokens.find((token) => token.length >= 4 && token.length <= 90 && !/^[\d\W]+$/.test(token));
+    const fallback = tokens.slice(0, 12).join(" ");
+    const normalized = normalizeOutlineTitle((preferred ?? fallback).replace(/^[\d.\-)\]\s]+/, ""));
+    if (normalized.length < 4) continue;
+    const title = normalized.length > 72 ? `${normalized.slice(0, 72).trimEnd()}...` : normalized;
+    const dedupeKey = `${pageNumber}:${title.toLowerCase()}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    candidates.push({ title, pageNumber });
+    if (candidates.length >= OUTLINE_TEXT_CANDIDATE_LIMIT) break;
+  }
+  return candidates;
+}
+
+function buildOutlineTree(entries: OutlineEntry[], pageCount: number): OutlineTreeNode[] {
+  const roots: OutlineTreeNode[] = [];
+  const stack: Array<{ children: OutlineTreeNode[] }> = [{ children: roots }];
+  for (const entry of entries) {
+    const title = normalizeOutlineTitle(entry.title);
+    if (title.length === 0) continue;
+    const pageNumber = clamp(Math.floor(entry.pageNumber), 1, Math.max(1, pageCount));
+    let depth = normalizeOutlineDepth(entry.depth);
+    if (depth > stack.length - 1) depth = stack.length - 1;
+    while (stack.length - 1 > depth) stack.pop();
+    const node: OutlineTreeNode = { title, pageNumber, children: [] };
+    stack[stack.length - 1].children.push(node);
+    stack.push({ children: node.children });
+  }
+  return roots;
+}
+
+function countOutlineDescendants(node: OutlineTreeNode): number {
+  return node.children.length + node.children.reduce((sum, child) => sum + countOutlineDescendants(child), 0);
+}
+
+function countOutlineVisible(nodes: OutlineTreeNode[]): number {
+  return nodes.length + nodes.reduce((sum, node) => sum + countOutlineDescendants(node), 0);
+}
+
+function applyOutlineEntriesToPdfDocument(outputDocument: PDFDocument, entries: OutlineEntry[]): void {
+  if (outputDocument.getPageCount() === 0) {
+    outputDocument.catalog.delete(PDFName.of("Outlines"));
+    return;
+  }
+
+  const tree = buildOutlineTree(entries, outputDocument.getPageCount());
+  if (tree.length === 0) {
+    outputDocument.catalog.delete(PDFName.of("Outlines"));
+    return;
+  }
+
+  const writeLevel = (parentRef: PDFRef, nodes: OutlineTreeNode[]): { first: PDFRef; last: PDFRef } | null => {
+    let first: PDFRef | null = null;
+    let last: PDFRef | null = null;
+    let previousRef: PDFRef | null = null;
+    let previousDict: PDFDict | null = null;
+
+    for (const node of nodes) {
+      const pageRef = outputDocument.getPage(node.pageNumber - 1).ref;
+      const itemDict = outputDocument.context.obj({
+        Title: PDFHexString.fromText(node.title),
+        Parent: parentRef,
+        Dest: outputDocument.context.obj([pageRef, PDFName.of("Fit")]),
+      }) as PDFDict;
+      const itemRef = outputDocument.context.register(itemDict);
+
+      if (!first) first = itemRef;
+      if (previousRef && previousDict) {
+        previousDict.set(PDFName.of("Next"), itemRef);
+        itemDict.set(PDFName.of("Prev"), previousRef);
+      }
+
+      if (node.children.length > 0) {
+        const childLinks = writeLevel(itemRef, node.children);
+        if (childLinks) {
+          itemDict.set(PDFName.of("First"), childLinks.first);
+          itemDict.set(PDFName.of("Last"), childLinks.last);
+          itemDict.set(PDFName.of("Count"), PDFNumber.of(countOutlineDescendants(node)));
+        }
+      }
+
+      previousRef = itemRef;
+      previousDict = itemDict;
+      last = itemRef;
+    }
+
+    if (!first || !last) return null;
+    return { first, last };
+  };
+
+  const outlinesDict = outputDocument.context.obj({ Type: PDFName.of("Outlines") }) as PDFDict;
+  const outlinesRef = outputDocument.context.register(outlinesDict);
+  const links = writeLevel(outlinesRef, tree);
+  if (!links) {
+    outputDocument.catalog.delete(PDFName.of("Outlines"));
+    return;
+  }
+
+  outlinesDict.set(PDFName.of("First"), links.first);
+  outlinesDict.set(PDFName.of("Last"), links.last);
+  outlinesDict.set(PDFName.of("Count"), PDFNumber.of(countOutlineVisible(tree)));
+  outputDocument.catalog.set(PDFName.of("Outlines"), outlinesRef);
+  outputDocument.catalog.set(PDFName.of("PageMode"), PDFName.of("UseOutlines"));
 }
 
 function hasPdfHeader(bytes: Uint8Array): boolean {
@@ -193,6 +505,11 @@ function App() {
   const [pageInput, setPageInput] = useState("1");
   const [pageOrder, setPageOrder] = useState<number[]>([]);
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("thumbnails");
+  const [outlinePanelMode, setOutlinePanelMode] = useState<OutlinePanelMode>("view");
+  const [outlineEntries, setOutlineEntries] = useState<OutlineEntry[]>([]);
+  const [isLoadingOutline, setIsLoadingOutline] = useState(false);
+  const [isGeneratingOutline, setIsGeneratingOutline] = useState(false);
   const [saveType, setSaveType] = useState<SaveType>("pdf");
   const [openExplorerAfterSave, setOpenExplorerAfterSave] = useState(true);
   const [quickSelectInput, setQuickSelectInput] = useState("");
@@ -223,6 +540,12 @@ function App() {
   const [thumbScrollTop, setThumbScrollTop] = useState(0);
   const [thumbViewportHeight, setThumbViewportHeight] = useState(0);
   const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 });
+  const [previewPageSize, setPreviewPageSize] = useState({ width: 0, height: 0 });
+  const [previewTextSpans, setPreviewTextSpans] = useState<PreviewTextSpan[]>([]);
+  const [selectedPreviewText, setSelectedPreviewText] = useState("");
+  const [isAreaSelectMode, setIsAreaSelectMode] = useState(false);
+  const [isAreaSelecting, setIsAreaSelecting] = useState(false);
+  const [previewSelectionRect, setPreviewSelectionRect] = useState<PreviewSelectionRect | null>(null);
   const [previewZoom, setPreviewZoom] = useState(100);
   const [pageRotations, setPageRotations] = useState<Record<number, number>>({});
   const [isPreviewFocused, setIsPreviewFocused] = useState(false);
@@ -230,10 +553,17 @@ function App() {
   const [dropTargetPage, setDropTargetPage] = useState<number | null>(null);
   const [draggingPageIndex, setDraggingPageIndex] = useState<number | null>(null);
   const [isPointerReordering, setIsPointerReordering] = useState(false);
+  const [isOutlinePointerReordering, setIsOutlinePointerReordering] = useState(false);
+  const [draggingOutlineId, setDraggingOutlineId] = useState<string | null>(null);
+  const [draggingOutlineIndex, setDraggingOutlineIndex] = useState<number | null>(null);
+  const [outlineDropTargetId, setOutlineDropTargetId] = useState<string | null>(null);
 
   const previewHostRef = useRef<HTMLDivElement | null>(null);
+  const previewInteractionRef = useRef<HTMLDivElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewTextLayerRef = useRef<HTMLDivElement | null>(null);
   const thumbViewportRef = useRef<HTMLDivElement | null>(null);
+  const outlineListRef = useRef<HTMLDivElement | null>(null);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
   const activePageRef = useRef(1);
   const thumbnailUrlsRef = useRef<Record<number, string>>({});
@@ -246,10 +576,26 @@ function App() {
   const pageRotationsRef = useRef<Record<number, number>>({});
   const pageOrderRef = useRef<number[]>([]);
   const toastTimerRef = useRef<number | null>(null);
+  const previewSelectionRectRef = useRef<PreviewSelectionRect | null>(null);
+  const wheelPageDeltaRef = useRef(0);
+  const lastWheelPageNavAtRef = useRef(0);
+  const outlineEntriesRef = useRef<OutlineEntry[]>([]);
+  const isLoadingOutlineRef = useRef(isLoadingOutline);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
   const selectedPageNumbers = useMemo(() => pageOrder.filter((pageNumber) => selectedPages.has(pageNumber)), [pageOrder, selectedPages]);
+  const validOutlineEntries = useMemo(
+    () => outlineEntries
+      .map((entry) => ({
+        ...entry,
+        title: normalizeOutlineTitle(entry.title),
+        pageNumber: clamp(Math.floor(entry.pageNumber), 1, Math.max(1, pageCount)),
+        depth: normalizeOutlineDepth(entry.depth),
+      }))
+      .filter((entry) => entry.title.length > 0),
+    [outlineEntries, pageCount],
+  );
   const pageOrderIndexMap = useMemo(() => {
     const map: Record<number, number> = {};
     pageOrder.forEach((pageNumber, index) => {
@@ -290,6 +636,14 @@ function App() {
     pageOrderRef.current = pageOrder;
   }, [pageOrder]);
 
+  useEffect(() => {
+    outlineEntriesRef.current = outlineEntries;
+  }, [outlineEntries]);
+
+  useEffect(() => {
+    isLoadingOutlineRef.current = isLoadingOutline;
+  }, [isLoadingOutline]);
+
   const showToast = useCallback((text: string) => {
     setToastText(text);
     if (toastTimerRef.current !== null) {
@@ -305,6 +659,10 @@ function App() {
     activePageRef.current = activePage;
     setPageInput(String(activePage));
   }, [activePage]);
+
+  useEffect(() => {
+    previewSelectionRectRef.current = previewSelectionRect;
+  }, [previewSelectionRect]);
 
   const clearThumbnailPipeline = useCallback(() => {
     for (const url of Object.values(thumbnailUrlsRef.current)) URL.revokeObjectURL(url);
@@ -326,6 +684,11 @@ function App() {
     canvas.height = 0;
     canvas.style.width = "0px";
     canvas.style.height = "0px";
+    setPreviewPageSize({ width: 0, height: 0 });
+    setPreviewTextSpans([]);
+    setSelectedPreviewText("");
+    setPreviewSelectionRect(null);
+    setIsAreaSelecting(false);
   }, []);
 
   const replacePdfDocument = useCallback(async (nextDoc: PDFDocumentProxy | null) => {
@@ -359,6 +722,324 @@ function App() {
     if (pdfDocRef.current) void pdfDocRef.current.destroy();
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
   }, [clearThumbnailPipeline]);
+
+  const readOutlineEntriesFromDocument = useCallback(async (doc: PDFDocumentProxy): Promise<OutlineEntry[]> => {
+    let timeoutHandle: number | null = null;
+    const rawOutline = await Promise.race([
+      doc.getOutline(),
+      new Promise<Awaited<ReturnType<PDFDocumentProxy["getOutline"]>>>((resolve) => {
+        timeoutHandle = window.setTimeout(() => resolve([]), OUTLINE_LOAD_TIMEOUT_MS);
+      }),
+    ]);
+    if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
+    if (!rawOutline || rawOutline.length === 0) return [];
+    const entries: OutlineEntry[] = [];
+    await flattenPdfOutlineNodes(doc, rawOutline as unknown as PdfOutlineNode[], 0, entries);
+    return entries;
+  }, []);
+
+  useEffect(() => {
+    if (!pdfDoc) {
+      setOutlineEntries([]);
+      setIsLoadingOutline(false);
+      setIsGeneratingOutline(false);
+      setSidebarTab("thumbnails");
+      setOutlinePanelMode("view");
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingOutline(true);
+    void (async () => {
+      try {
+        const entries = await readOutlineEntriesFromDocument(pdfDoc);
+        if (!cancelled) setOutlineEntries(entries);
+      } catch (error) {
+        if (!cancelled) setErrorText(`${tr("목차 로딩 실패", "Failed to load outline")}: ${formatError(error)}`);
+      } finally {
+        if (!cancelled) setIsLoadingOutline(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfDoc, readOutlineEntriesFromDocument, tr]);
+
+  const reloadOutlineFromPdf = useCallback(async () => {
+    if (!pdfDoc || isBusy) return;
+    setErrorText(null);
+    setIsLoadingOutline(true);
+    try {
+      const entries = await readOutlineEntriesFromDocument(pdfDoc);
+      setOutlineEntries(entries);
+      setSidebarTab("outline");
+      setOutlinePanelMode("view");
+      showToast(
+        tr(
+          `PDF 목차 ${entries.length}개를 불러왔습니다.`,
+          `Loaded ${entries.length} outline items from PDF.`,
+        ),
+      );
+    } catch (error) {
+      setErrorText(`${tr("목차 로딩 실패", "Failed to load outline")}: ${formatError(error)}`);
+    } finally {
+      setIsLoadingOutline(false);
+    }
+  }, [isBusy, pdfDoc, readOutlineEntriesFromDocument, showToast, tr]);
+
+  const addManualOutlineAtActivePage = useCallback(() => {
+    if (pageCount === 0) return;
+    setOutlineEntries((prev) => ([
+      ...prev,
+      {
+        id: createOutlineEntryId(),
+        title: tr(`새 목차 ${prev.length + 1}`, `New outline ${prev.length + 1}`),
+        pageNumber: activePage,
+        depth: 0,
+        source: "manual",
+      },
+    ]));
+    setSidebarTab("outline");
+    setOutlinePanelMode("edit");
+  }, [activePage, pageCount, tr]);
+
+  const appendOutlineFromBodyText = useCallback(async () => {
+    if (!pdfDoc || isBusy || isGeneratingOutline) return;
+    setErrorText(null);
+    setIsGeneratingOutline(true);
+    try {
+      const candidates = await extractOutlineCandidatesFromText(pdfDoc);
+      if (candidates.length === 0) {
+        showToast(tr("본문에서 목차 후보를 찾지 못했습니다.", "No outline candidates found from document text."));
+        return;
+      }
+      setOutlineEntries((prev) => {
+        const seen = new Set(prev.map((entry) => `${entry.pageNumber}:${normalizeOutlineTitle(entry.title).toLowerCase()}`));
+        const next = [...prev];
+        for (const candidate of candidates) {
+          const key = `${candidate.pageNumber}:${candidate.title.toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          next.push({
+            id: createOutlineEntryId(),
+            title: candidate.title,
+            pageNumber: candidate.pageNumber,
+            depth: 0,
+            source: "text",
+          });
+        }
+        return next;
+      });
+      setSidebarTab("outline");
+      setOutlinePanelMode("edit");
+      showToast(tr("본문 인식 텍스트로 목차를 추가했습니다.", "Added outline entries from detected body text."));
+    } catch (error) {
+      setErrorText(`${tr("본문 텍스트 분석 실패", "Failed to analyze body text")}: ${formatError(error)}`);
+    } finally {
+      setIsGeneratingOutline(false);
+    }
+  }, [isBusy, isGeneratingOutline, pdfDoc, showToast, tr]);
+
+  const updateOutlineTitle = useCallback((entryId: string, nextTitle: string) => {
+    setOutlineEntries((prev) => prev.map((entry) => (entry.id === entryId ? { ...entry, title: nextTitle } : entry)));
+  }, []);
+
+  const updateOutlinePageNumber = useCallback((entryId: string, nextPageText: string) => {
+    const parsed = parsePositiveInt(nextPageText);
+    if (!parsed) return;
+    setOutlineEntries((prev) => prev.map((entry) => (
+      entry.id === entryId
+        ? { ...entry, pageNumber: clamp(parsed, 1, Math.max(1, pageCount)) }
+        : entry
+    )));
+  }, [pageCount]);
+
+  const updateOutlineDepth = useCallback((entryId: string, nextDepth: number) => {
+    setOutlineEntries((prev) => prev.map((entry) => (
+      entry.id === entryId
+        ? { ...entry, depth: normalizeOutlineDepth(nextDepth) }
+        : entry
+    )));
+  }, []);
+
+  const removeOutlineEntry = useCallback((entryId: string) => {
+    setOutlineEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+  }, []);
+
+  const clearOutlineEntries = useCallback(() => {
+    setIsOutlinePointerReordering(false);
+    setDraggingOutlineId(null);
+    setDraggingOutlineIndex(null);
+    setOutlineDropTargetId(null);
+    setOutlineEntries([]);
+  }, []);
+
+  const clearOutlineDragState = useCallback(() => {
+    setIsOutlinePointerReordering(false);
+    setDraggingOutlineId(null);
+    setDraggingOutlineIndex(null);
+    setOutlineDropTargetId(null);
+  }, []);
+
+  useEffect(() => {
+    if (sidebarTab === "outline" && outlinePanelMode === "edit") return;
+    clearOutlineDragState();
+  }, [clearOutlineDragState, outlinePanelMode, sidebarTab]);
+
+  const moveOutlineEntry = useCallback((entryId: string, delta: -1 | 1) => {
+    setOutlineEntries((prev) => {
+      const index = prev.findIndex((entry) => entry.id === entryId);
+      if (index < 0) return prev;
+      const nextIndex = index + delta;
+      if (nextIndex < 0 || nextIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(index, 1);
+      next.splice(nextIndex, 0, moved);
+      return next;
+    });
+  }, []);
+
+  const moveOutlineEntryByIndex = useCallback((sourceIndex: number, targetIndex: number) => {
+    if (sourceIndex === targetIndex) return;
+    setOutlineEntries((prev) => {
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex >= prev.length || targetIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isOutlinePointerReordering) return;
+    const move = (event: MouseEvent) => {
+      if (draggingOutlineIndex === null) return;
+      const listElement = outlineListRef.current;
+      if (!listElement) return;
+      const hovered = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+      const targetItem = hovered?.closest(".outline-item") as HTMLElement | null;
+      const targetId = targetItem?.dataset.outlineId;
+      if (!targetId) return;
+      const targetIndex = outlineEntriesRef.current.findIndex((entry) => entry.id === targetId);
+      if (targetIndex < 0 || targetIndex === draggingOutlineIndex) return;
+      moveOutlineEntryByIndex(draggingOutlineIndex, targetIndex);
+      setDraggingOutlineIndex(targetIndex);
+      setOutlineDropTargetId(targetId);
+    };
+    const stop = () => {
+      clearOutlineDragState();
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+    };
+  }, [clearOutlineDragState, draggingOutlineIndex, isOutlinePointerReordering, moveOutlineEntryByIndex]);
+
+  const jumpToOutlinePage = useCallback((pageNumber: number) => {
+    if (pageCount === 0) return;
+    setActivePage(clamp(pageNumber, 1, pageCount));
+  }, [pageCount]);
+
+  const addSelectedPreviewTextToOutline = useCallback(async () => {
+    const text = normalizeOutlineTitle(selectedPreviewText);
+    if (text.length === 0) {
+      await message(tr("본문에서 텍스트를 먼저 선택해주세요.", "Select text in the page body first."), {
+        title: tr("안내", "Notice"),
+      });
+      return;
+    }
+    setOutlineEntries((prev) => ([
+      ...prev,
+      {
+        id: createOutlineEntryId(),
+        title: text.length > 120 ? `${text.slice(0, 120).trimEnd()}...` : text,
+        pageNumber: activePage,
+        depth: 0,
+        source: "text",
+      },
+    ]));
+    setSidebarTab("outline");
+    setOutlinePanelMode("edit");
+    showToast(tr("선택한 본문 텍스트를 목차에 추가했습니다.", "Added selected body text to outline."));
+  }, [activePage, selectedPreviewText, showToast, tr]);
+
+  const handlePreviewTextLayerMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!isAreaSelectMode || event.button !== 0) return;
+    const layer = previewTextLayerRef.current;
+    if (!layer) return;
+    const rect = layer.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    setIsAreaSelecting(true);
+    setPreviewSelectionRect({ x1: x, y1: y, x2: x, y2: y });
+    setSelectedPreviewText("");
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) selection.removeAllRanges();
+    event.preventDefault();
+  }, [isAreaSelectMode]);
+
+  useEffect(() => {
+    if (!isAreaSelecting) return;
+    const move = (event: MouseEvent) => {
+      const layer = previewTextLayerRef.current;
+      if (!layer) return;
+      const rect = layer.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      setPreviewSelectionRect((prev) => (prev ? { ...prev, x2: x, y2: y } : prev));
+    };
+    const stop = () => {
+      setIsAreaSelecting(false);
+      const layer = previewTextLayerRef.current;
+      const rectData = previewSelectionRectRef.current;
+      if (!layer || !rectData) return;
+      const normalized = normalizeSelectionRect(rectData);
+      const selected: string[] = [];
+      const layerRect = layer.getBoundingClientRect();
+      const spans = Array.from(layer.querySelectorAll<HTMLElement>(".preview-text-span"));
+      for (const span of spans) {
+        const r = span.getBoundingClientRect();
+        const left = r.left - layerRect.left;
+        const top = r.top - layerRect.top;
+        const right = left + r.width;
+        const bottom = top + r.height;
+        const intersects = !(right < normalized.left || left > normalized.right || bottom < normalized.top || top > normalized.bottom);
+        if (!intersects) continue;
+        const text = normalizeOutlineTitle(span.dataset.text ?? span.textContent ?? "");
+        if (text.length > 0) selected.push(text);
+      }
+      setPreviewSelectionRect(null);
+      const joined = normalizeOutlineTitle(selected.join(" "));
+      if (joined.length > 0) setSelectedPreviewText(joined);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+    };
+  }, [isAreaSelecting]);
+
+  useEffect(() => {
+    const onSelectionChange = () => {
+      if (isAreaSelecting || isAreaSelectMode) return;
+      const selection = window.getSelection();
+      const layer = previewTextLayerRef.current;
+      if (!selection || !layer) return;
+      if (selection.isCollapsed) {
+        setSelectedPreviewText("");
+        return;
+      }
+      const anchor = selection.anchorNode;
+      const focus = selection.focusNode;
+      const isInsideLayer = (node: Node | null) => !!node && (node === layer || layer.contains(node));
+      if (!isInsideLayer(anchor) || !isInsideLayer(focus)) return;
+      setSelectedPreviewText(normalizeOutlineTitle(selection.toString()));
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, [isAreaSelecting, isAreaSelectMode]);
 
   const isPageProtected = useCallback((pageNumber: number) => {
     return pageNumber === activePageRef.current || visiblePagesRef.current.has(pageNumber);
@@ -482,6 +1163,15 @@ function App() {
         context.clearRect(0, 0, viewport.width, viewport.height);
         renderTask = page.render({ canvas, canvasContext: context, viewport, intent: "display" });
         await renderTask.promise;
+        const textContent = await page.getTextContent();
+        if (cancelled) return;
+        setPreviewPageSize({
+          width: Math.max(1, Math.floor(viewport.width)),
+          height: Math.max(1, Math.floor(viewport.height)),
+        });
+        setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale));
+        setSelectedPreviewText("");
+        setPreviewSelectionRect(null);
       } catch (error) {
         const known = error as { name?: string };
         if (known.name !== "RenderingCancelledException" && !cancelled) {
@@ -508,6 +1198,7 @@ function App() {
     setIsLoadingPdf(true);
     setStatus({ type: "loadingPdf" });
     try {
+      clearOutlineDragState();
       clearThumbnailPipeline();
       await replacePdfDocument(null);
       clearPreviewCanvas();
@@ -518,10 +1209,16 @@ function App() {
       setActivePage(1);
       setPageInput("1");
       setSelectedPages(new Set());
+      setSidebarTab("thumbnails");
+      setOutlinePanelMode("view");
+      setOutlineEntries([]);
+      setIsLoadingOutline(false);
+      setIsGeneratingOutline(false);
       setQuickSelectInput("");
       setRangeFromInput("");
       setRangeToInput("");
       setPreviewZoom(100);
+      setIsAreaSelectMode(false);
       setPageRotations({});
       pageRotationsRef.current = {};
 
@@ -538,9 +1235,12 @@ function App() {
       setActivePage(1);
       setPageInput("1");
       setSelectedPages(new Set([1]));
+      setSidebarTab("thumbnails");
+      setOutlinePanelMode("view");
       setRangeFromInput("");
       setRangeToInput("");
       setPreviewZoom(100);
+      setIsAreaSelectMode(false);
       setPageRotations({});
       pageRotationsRef.current = {};
       setStatus({ type: "loaded", pages: loadedDoc.numPages });
@@ -550,7 +1250,7 @@ function App() {
     } finally {
       setIsLoadingPdf(false);
     }
-  }, [clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument, tr]);
+  }, [clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument, tr]);
 
   const handleOpenAddPdfModal = useCallback(async () => {
     if (!pdfDoc || !pdfBytes || isBusy) return;
@@ -894,6 +1594,7 @@ function App() {
 
   const handleClosePdf = useCallback(async () => {
     setErrorText(null);
+    clearOutlineDragState();
     clearThumbnailPipeline();
     await replacePdfDocument(null);
     clearPreviewCanvas();
@@ -904,14 +1605,20 @@ function App() {
     setActivePage(1);
     setPageInput("1");
     setSelectedPages(new Set());
+    setSidebarTab("thumbnails");
+    setOutlinePanelMode("view");
+    setOutlineEntries([]);
+    setIsLoadingOutline(false);
+    setIsGeneratingOutline(false);
     setQuickSelectInput("");
     setRangeFromInput("");
     setRangeToInput("");
     setPreviewZoom(100);
+    setIsAreaSelectMode(false);
     setPageRotations({});
     pageRotationsRef.current = {};
     setStatus({ type: "ready" });
-  }, [clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
+  }, [clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
 
   const togglePageSelection = useCallback((pageNumber: number) => {
     setSelectedPages((prev) => {
@@ -1014,13 +1721,38 @@ function App() {
 
   const handlePreviewWheel = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
-      if (!isPreviewFocused || !event.ctrlKey || !pdfDoc || isBusy) return;
+      if (!isPreviewFocused || !pdfDoc || isBusy) return;
+      if (event.ctrlKey) {
+        event.preventDefault();
+        const delta = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+        setPreviewZoom((previous) => clamp(previous + delta, ZOOM_MIN, ZOOM_MAX));
+        return;
+      }
+      if (pageCount === 0) return;
       event.preventDefault();
-      const delta = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
-      setPreviewZoom((previous) => clamp(previous + delta, ZOOM_MIN, ZOOM_MAX));
+      wheelPageDeltaRef.current += event.deltaY;
+      if (Math.abs(wheelPageDeltaRef.current) < 28) return;
+      const now = Date.now();
+      if (now - lastWheelPageNavAtRef.current < 140) return;
+      const direction = wheelPageDeltaRef.current > 0 ? 1 : -1;
+      wheelPageDeltaRef.current = 0;
+      lastWheelPageNavAtRef.current = now;
+      movePage(direction);
     },
-    [isPreviewFocused, isBusy, pdfDoc],
+    [isPreviewFocused, isBusy, movePage, pageCount, pdfDoc],
   );
+
+  const toggleAreaSelectionMode = useCallback(() => {
+    setIsAreaSelectMode((prev) => {
+      const next = !prev;
+      if (!next) {
+        setIsAreaSelecting(false);
+        setPreviewSelectionRect(null);
+      }
+      setSelectedPreviewText("");
+      return next;
+    });
+  }, []);
 
   const handleArrowPageNavigation = useCallback((event: KeyboardEvent<HTMLElement>) => {
     if (!pdfDoc || isBusy || pageCount === 0) return;
@@ -1072,6 +1804,18 @@ function App() {
     });
   }, [pageCount, rangeFromInput, rangeToInput, tr]);
 
+  const waitForOutlineLoadToFinish = useCallback(async (timeoutMs = OUTLINE_SAVE_WAIT_TIMEOUT_MS): Promise<boolean> => {
+    if (!isLoadingOutlineRef.current) return true;
+    const startedAt = Date.now();
+    while (isLoadingOutlineRef.current) {
+      if (Date.now() - startedAt >= timeoutMs) return false;
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, OUTLINE_SAVE_WAIT_POLL_MS);
+      });
+    }
+    return true;
+  }, []);
+
   const handleSavePdf = useCallback(async () => {
     if (!pdfBytes || selectedPageNumbers.length === 0) return;
     const sourceStem = normalizeFileStem(pdfPath ?? "document.pdf");
@@ -1098,9 +1842,21 @@ function App() {
       }
       const sourceDocument = await PDFDocument.load(workingBytes, { updateMetadata: false });
       const outputDocument = await PDFDocument.create();
-      for (const sourcePageNumber of selectedPageNumbers) {
+      const sourceToOutputPage = new Map<number, number>();
+      for (const [targetIndex, sourcePageNumber] of selectedPageNumbers.entries()) {
         const extraRotation = pageRotationsRef.current[sourcePageNumber] ?? 0;
         await appendPageWithRotation(outputDocument, sourceDocument, sourcePageNumber - 1, extraRotation);
+        sourceToOutputPage.set(sourcePageNumber, targetIndex + 1);
+      }
+      const mappedOutlineEntries = validOutlineEntries
+        .filter((entry) => sourceToOutputPage.has(entry.pageNumber))
+        .map((entry) => ({
+          ...entry,
+          id: createOutlineEntryId(),
+          pageNumber: sourceToOutputPage.get(entry.pageNumber) ?? entry.pageNumber,
+        }));
+      if (mappedOutlineEntries.length > 0) {
+        applyOutlineEntriesToPdfDocument(outputDocument, mappedOutlineEntries);
       }
       const outputBytes = await outputDocument.save();
       await writeFile(targetPath, outputBytes);
@@ -1124,7 +1880,7 @@ function App() {
     } finally {
       setIsSaving(false);
     }
-  }, [openExplorerAfterSave, pdfBytes, pdfPath, selectedPageNumbers, showToast, tr]);
+  }, [openExplorerAfterSave, pdfBytes, pdfPath, selectedPageNumbers, showToast, tr, validOutlineEntries]);
 
   const handleSaveImages = useCallback(async (type: "png" | "jpg") => {
     if (!pdfDoc || selectedPageNumbers.length === 0) return;
@@ -1199,9 +1955,41 @@ function App() {
       });
       return;
     }
-    if (saveType === "pdf") await handleSavePdf();
-    else await handleSaveImages(saveType);
-  }, [pdfDoc, pdfBytes, selectedPageNumbers.length, saveType, handleSavePdf, handleSaveImages, tr]);
+    if (saveType === "pdf") {
+      let isOutlineReady = await waitForOutlineLoadToFinish();
+      if (!isOutlineReady) {
+        const timeoutSeconds = Math.round(OUTLINE_SAVE_WAIT_TIMEOUT_MS / 1000);
+        const retry = await ask(
+          tr(
+            `목차 로딩이 ${timeoutSeconds}초 안에 완료되지 않았습니다. 다시 기다릴까요?`,
+            `Outline loading did not complete within ${timeoutSeconds} seconds. Retry waiting?`,
+          ),
+          { title: tr("목차 로딩 지연", "Outline loading delay") },
+        );
+        if (!retry) {
+          await message(
+            tr("목차 로딩 미완료로 PDF 저장을 취소했습니다.", "Canceled PDF save because outline loading is not complete."),
+            { title: tr("안내", "Notice") },
+          );
+          return;
+        }
+        isOutlineReady = await waitForOutlineLoadToFinish();
+        if (!isOutlineReady) {
+          await message(
+            tr(
+              "목차 로딩이 계속 지연되어 PDF 저장을 취소했습니다. 잠시 후 다시 시도해주세요.",
+              "Outline loading is still delayed, so PDF save was canceled. Please try again shortly.",
+            ),
+            { title: tr("안내", "Notice") },
+          );
+          return;
+        }
+      }
+      await handleSavePdf();
+    } else {
+      await handleSaveImages(saveType);
+    }
+  }, [pdfDoc, pdfBytes, selectedPageNumbers.length, saveType, handleSavePdf, handleSaveImages, tr, waitForOutlineLoadToFinish]);
 
   const openProjectRepo = useCallback(async () => {
     try {
@@ -1212,6 +2000,10 @@ function App() {
   }, [tr]);
 
   const totalThumbHeight = pageOrder.length * THUMB_ITEM_HEIGHT;
+  const normalizedPreviewSelectionRect = useMemo(
+    () => (previewSelectionRect ? normalizeSelectionRect(previewSelectionRect) : null),
+    [previewSelectionRect],
+  );
 
   return (
     <div className="app-shell">
@@ -1384,99 +2176,330 @@ function App() {
         <aside className="panel sidebar">
           <div className="sidebar-head">
             <strong>{pdfPath ? normalizeFileStem(pdfPath) : tr("불러온 PDF 없음", "No PDF loaded")}</strong>
-            <span>{tr("대용량 PDF도 스크롤 구간만 썸네일 렌더링", "Only visible range thumbnails are rendered for large PDFs")}</span>
+            <div className="sidebar-tab-row">
+              <button
+                className={`ghost-btn micro-btn ${sidebarTab === "thumbnails" ? "tab-active" : ""}`}
+                onClick={() => setSidebarTab("thumbnails")}
+                type="button"
+              >
+                {tr("썸네일", "Thumbnails")}
+              </button>
+              <button
+                className={`ghost-btn micro-btn ${sidebarTab === "outline" ? "tab-active" : ""}`}
+                onClick={() => {
+                  setSidebarTab("outline");
+                  setOutlinePanelMode("view");
+                }}
+                type="button"
+              >
+                {tr("목차", "Outline")}
+              </button>
+            </div>
             <div className="sidebar-info-row">
-              <span className="sidebar-info-text">{tr("썸네일", "Thumbnails")} {loadedThumbCount}/{pageCount} ({tr("대기/처리", "queued/working")} {thumbQueueCount})</span>
-              <div className="sidebar-buttons">
-                <button
-                  className="ghost-btn micro-btn"
-                  onClick={() => setSelectedPages(new Set(pageNumbers))}
-                  disabled={!pdfDoc || isBusy || pageCount === 0}
-                  title={tr("전체 선택", "Select all")}
-                >
-                  {tr("전체", "All")}
-                </button>
-                <button
-                  className="ghost-btn micro-btn"
-                  onClick={() => setSelectedPages(new Set())}
-                  disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
-                  title={tr("선택 취소", "Clear selection")}
-                >
-                  {tr("취소", "Clear")}
-                </button>
-              </div>
+              {sidebarTab === "thumbnails" ? (
+                <>
+                  <span className="sidebar-info-text">
+                    {tr("썸네일", "Thumbnails")} {loadedThumbCount}/{pageCount} ({tr("대기/처리", "queued/working")} {thumbQueueCount})
+                  </span>
+                  <div className="sidebar-buttons">
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={() => setSelectedPages(new Set(pageNumbers))}
+                      disabled={!pdfDoc || isBusy || pageCount === 0}
+                      title={tr("전체 선택", "Select all")}
+                    >
+                      {tr("전체", "All")}
+                    </button>
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={() => setSelectedPages(new Set())}
+                      disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+                      title={tr("선택 취소", "Clear selection")}
+                    >
+                      {tr("취소", "Clear")}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span className="sidebar-info-text">{tr("목차 항목", "Outline entries")} {outlineEntries.length}</span>
+                  <div className="sidebar-buttons">
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={() => setOutlinePanelMode(outlinePanelMode === "view" ? "edit" : "view")}
+                      disabled={!pdfDoc || isBusy || isLoadingOutline}
+                      type="button"
+                      title={outlinePanelMode === "view" ? tr("수정/추가 모드", "Switch to edit/add mode") : tr("기본 보기 모드", "Switch to viewer mode")}
+                    >
+                      {outlinePanelMode === "view" ? tr("수정/추가", "Edit/Add") : tr("기본보기", "Viewer")}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
-          <div
-            className="thumbnail-viewport"
-            ref={thumbViewportRef}
-            tabIndex={0}
-            onMouseDown={(event) => event.currentTarget.focus()}
-            onKeyDown={handleArrowPageNavigation}
-            onScroll={(event) => setThumbScrollTop(event.currentTarget.scrollTop)}
-          >
-            {pageCount === 0 ? <div className="empty-panel">{tr("PDF를 열면 페이지가 표시됩니다.", "Pages appear after opening a PDF.")}</div> : (
-              <div className="thumbnail-inner" style={{ height: `${totalThumbHeight}px` }}>
-                {visiblePageNumbers.map((pageNumber) => (
-                  <article
-                    key={pageNumber}
-                    className={`thumb-card ${activePage === pageNumber ? "active" : ""} ${draggingPage === pageNumber ? "dragging" : ""} ${dropTargetPage === pageNumber ? "drop-target" : ""}`}
-                    style={{ top: `${(pageOrderIndexMap[pageNumber] ?? 0) * THUMB_ITEM_HEIGHT}px` }}
-                  >
-                    <div className="thumb-head">
-                      <span className="thumb-head-left">
-                        <span
-                          className="thumb-drag-handle"
-                          title={tr("여기를 잡고 드래그하여 순서 이동", "Drag here to reorder")}
-                          aria-label={tr("드래그 핸들", "Drag handle")}
-                          onMouseDown={(event) => {
-                            if (isBusy) return;
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setIsPointerReordering(true);
-                            setDraggingPage(pageNumber);
-                            setDraggingPageIndex(pageOrderIndexMap[pageNumber] ?? null);
-                            setDropTargetPage(pageNumber);
-                          }}
-                        >
-                          |||
+          {sidebarTab === "thumbnails" ? (
+            <div
+              className="thumbnail-viewport"
+              ref={thumbViewportRef}
+              tabIndex={0}
+              onMouseDown={(event) => event.currentTarget.focus()}
+              onKeyDown={handleArrowPageNavigation}
+              onScroll={(event) => setThumbScrollTop(event.currentTarget.scrollTop)}
+            >
+              {pageCount === 0 ? <div className="empty-panel">{tr("PDF를 열면 페이지가 표시됩니다.", "Pages appear after opening a PDF.")}</div> : (
+                <div className="thumbnail-inner" style={{ height: `${totalThumbHeight}px` }}>
+                  {visiblePageNumbers.map((pageNumber) => (
+                    <article
+                      key={pageNumber}
+                      className={`thumb-card ${activePage === pageNumber ? "active" : ""} ${draggingPage === pageNumber ? "dragging" : ""} ${dropTargetPage === pageNumber ? "drop-target" : ""}`}
+                      style={{ top: `${(pageOrderIndexMap[pageNumber] ?? 0) * THUMB_ITEM_HEIGHT}px` }}
+                    >
+                      <div className="thumb-head">
+                        <span className="thumb-head-left">
+                          <span
+                            className="thumb-drag-handle"
+                            title={tr("여기를 잡고 드래그하여 순서 이동", "Drag here to reorder")}
+                            aria-label={tr("드래그 핸들", "Drag handle")}
+                            onMouseDown={(event) => {
+                              if (isBusy) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setIsPointerReordering(true);
+                              setDraggingPage(pageNumber);
+                              setDraggingPageIndex(pageOrderIndexMap[pageNumber] ?? null);
+                              setDropTargetPage(pageNumber);
+                            }}
+                          >
+                            |||
+                          </span>
+                          <span>{pageNumber}p</span>
                         </span>
-                        <span>{pageNumber}p</span>
-                      </span>
-                      <div className="thumb-actions" onClick={(event) => event.stopPropagation()}>
-                        <label className="thumb-check">
-                          <input type="checkbox" checked={selectedPages.has(pageNumber)} onChange={() => togglePageSelection(pageNumber)} />
-                          {tr("선택", "Pick")}
-                        </label>
-                        <button
-                          type="button"
-                          className="thumb-trash-btn"
-                          onClick={() => removePageFromSelection(pageNumber)}
-                          disabled={isBusy}
-                          title={selectedPages.has(pageNumber) ? tr("선택 해제", "Remove from selection") : tr("선택되지 않음", "Not selected")}
-                        >
-                          {tr("휴지통", "Trash")}
-                        </button>
+                        <div className="thumb-actions" onClick={(event) => event.stopPropagation()}>
+                          <label className="thumb-check">
+                            <input type="checkbox" checked={selectedPages.has(pageNumber)} onChange={() => togglePageSelection(pageNumber)} />
+                            {tr("선택", "Pick")}
+                          </label>
+                          <button
+                            type="button"
+                            className="thumb-trash-btn"
+                            onClick={() => removePageFromSelection(pageNumber)}
+                            disabled={isBusy}
+                            title={selectedPages.has(pageNumber) ? tr("선택 해제", "Remove from selection") : tr("선택되지 않음", "Not selected")}
+                          >
+                            {tr("휴지통", "Trash")}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                    <button className="thumb-preview-btn" onClick={() => setActivePage(pageNumber)} type="button">
-                      {thumbnailUrls[pageNumber] ? (
-                        <img
-                          src={thumbnailUrls[pageNumber]}
-                          alt={`${tr("페이지", "Page")} ${pageNumber}`}
-                          style={{
-                            transform: `rotate(${pageRotations[pageNumber] ?? 0}deg)`,
-                          }}
-                        />
-                      ) : (
-                        <div className="thumb-loading">{tr("렌더링 중...", "Rendering...")}</div>
-                      )}
+                      <button className="thumb-preview-btn" onClick={() => setActivePage(pageNumber)} type="button">
+                        {thumbnailUrls[pageNumber] ? (
+                          <img
+                            src={thumbnailUrls[pageNumber]}
+                            alt={`${tr("페이지", "Page")} ${pageNumber}`}
+                            style={{
+                              transform: `rotate(${pageRotations[pageNumber] ?? 0}deg)`,
+                            }}
+                          />
+                        ) : (
+                          <div className="thumb-loading">{tr("렌더링 중...", "Rendering...")}</div>
+                        )}
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div
+              className="outline-viewport"
+              tabIndex={0}
+              onMouseDown={(event) => event.currentTarget.focus()}
+              onKeyDown={handleArrowPageNavigation}
+            >
+              {pageCount === 0 ? <div className="empty-panel">{tr("PDF를 열면 목차 편집이 가능합니다.", "Open a PDF to edit outlines.")}</div> : null}
+              {pageCount > 0 && isLoadingOutline ? <div className="empty-panel">{tr("목차를 불러오는 중...", "Loading outlines...")}</div> : null}
+              {pageCount > 0 && !isLoadingOutline && outlineEntries.length === 0 ? (
+                <div className="empty-panel">
+                  {outlinePanelMode === "edit"
+                    ? tr("목차가 없습니다. 아래 버튼으로 생성하세요.", "No outlines yet. Use buttons below to generate.")
+                    : tr("목차가 없습니다. 수정/추가 모드에서 생성할 수 있습니다.", "No outlines. Create them in edit/add mode.")}
+                </div>
+              ) : null}
+              {pageCount > 0 && !isLoadingOutline && outlineEntries.length > 0 && outlinePanelMode === "view" ? (
+                <div className="outline-view-list">
+                  {outlineEntries.map((entry) => (
+                    <button
+                      key={entry.id}
+                      className={`outline-view-item ${activePage === entry.pageNumber ? "active" : ""}`}
+                      type="button"
+                      onClick={() => jumpToOutlinePage(entry.pageNumber)}
+                      style={{ paddingLeft: `${10 + normalizeOutlineDepth(entry.depth) * 16}px` }}
+                      title={`${entry.title} (${entry.pageNumber}p)`}
+                    >
+                      <span className="outline-view-title">{entry.title}</span>
+                      <span className="outline-view-page">{entry.pageNumber}</span>
                     </button>
-                  </article>
-                ))}
-              </div>
-            )}
-          </div>
+                  ))}
+                </div>
+              ) : null}
+              {pageCount > 0 && !isLoadingOutline && outlinePanelMode === "edit" ? (
+                <>
+                  <div className="outline-toolbar">
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={() => void reloadOutlineFromPdf()}
+                      disabled={!pdfDoc || isBusy || isLoadingOutline}
+                      type="button"
+                      title={tr("PDF 원본 목차를 다시 불러옵니다.", "Reload outline items from the PDF file.")}
+                    >
+                      {tr("PDF목차", "Load PDF Outline")}
+                    </button>
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={() => void appendOutlineFromBodyText()}
+                      disabled={!pdfDoc || isBusy || isGeneratingOutline}
+                      type="button"
+                      title={tr("본문 텍스트를 분석해 목차 후보를 추가합니다.", "Analyze page text and append outline candidates.")}
+                    >
+                      {isGeneratingOutline ? tr("분석중", "Analyzing...") : tr("본문추가", "Add from Text")}
+                    </button>
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={addManualOutlineAtActivePage}
+                      disabled={!pdfDoc || isBusy}
+                      type="button"
+                      title={tr("현재 페이지로 새 목차 항목을 추가합니다.", "Add a new outline entry for the current page.")}
+                    >
+                      {tr("현재추가", "Add Current")}
+                    </button>
+                    <button
+                      className="ghost-btn micro-btn"
+                      onClick={clearOutlineEntries}
+                      disabled={!pdfDoc || isBusy || outlineEntries.length === 0}
+                      type="button"
+                      title={tr("현재 목차 항목을 모두 삭제합니다.", "Remove all current outline entries.")}
+                    >
+                      {tr("전체비움", "Clear All")}
+                    </button>
+                  </div>
+                  {outlineEntries.length > 0 ? (
+                    <div className="outline-list" ref={outlineListRef}>
+                      {outlineEntries.map((entry, index) => (
+                        <article
+                          key={entry.id}
+                          data-outline-id={entry.id}
+                          className={`outline-item ${activePage === entry.pageNumber ? "active" : ""} ${draggingOutlineId === entry.id ? "dragging" : ""} ${outlineDropTargetId === entry.id ? "drop-target" : ""}`}
+                        >
+                          <div className="outline-item-top">
+                            <span
+                              className="outline-drag-handle"
+                              title={tr("여기를 잡고 드래그하여 목차 순서 이동", "Drag here to reorder outline items")}
+                              aria-label={tr("목차 드래그 핸들", "Outline drag handle")}
+                              onMouseDown={(event) => {
+                                if (isBusy) return;
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setIsOutlinePointerReordering(true);
+                                setDraggingOutlineId(entry.id);
+                                setDraggingOutlineIndex(index);
+                                setOutlineDropTargetId(entry.id);
+                              }}
+                            >
+                              |||
+                            </span>
+                            <button
+                              className="ghost-btn micro-btn"
+                              type="button"
+                              onClick={() => jumpToOutlinePage(entry.pageNumber)}
+                              title={tr(`이 목차 페이지(${entry.pageNumber}p)로 이동`, `Jump to this outline page (${entry.pageNumber}p)`)}
+                            >
+                              {entry.pageNumber}p
+                            </button>
+                            <span
+                              className={`outline-source ${entry.source}`}
+                              title={
+                                entry.source === "pdf"
+                                  ? tr("PDF 원본 목차에서 불러온 항목", "Imported from PDF outline")
+                                  : entry.source === "text"
+                                    ? tr("본문 텍스트 기반으로 생성된 항목", "Generated from body text")
+                                    : tr("수동으로 추가한 항목", "Added manually")
+                              }
+                            >
+                              {entry.source === "pdf" ? "PDF" : entry.source === "text" ? tr("본문", "Text") : tr("수동", "Manual")}
+                            </span>
+                            <button
+                              className="ghost-btn micro-btn"
+                              type="button"
+                              onClick={() => moveOutlineEntry(entry.id, -1)}
+                              disabled={index === 0}
+                              title={tr("목차 순서를 한 칸 위로 이동", "Move this outline item one step up")}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              className="ghost-btn micro-btn"
+                              type="button"
+                              onClick={() => moveOutlineEntry(entry.id, 1)}
+                              disabled={index === outlineEntries.length - 1}
+                              title={tr("목차 순서를 한 칸 아래로 이동", "Move this outline item one step down")}
+                            >
+                              ↓
+                            </button>
+                          </div>
+                          <div className="outline-edit-row">
+                            <input
+                              className="outline-title-input"
+                              value={entry.title}
+                              onChange={(event) => updateOutlineTitle(entry.id, event.currentTarget.value)}
+                              placeholder={tr("목차 제목", "Outline title")}
+                              title={tr("목차에 표시할 제목 문구를 입력", "Edit the visible outline title text")}
+                            />
+                          </div>
+                          <div className="outline-meta-row">
+                            <input
+                              className="outline-page-input"
+                              value={entry.pageNumber}
+                              onChange={(event) => updateOutlinePageNumber(entry.id, event.currentTarget.value)}
+                              inputMode="numeric"
+                              title={tr("이 목차가 가리킬 페이지 번호", "Page number this outline item points to")}
+                            />
+                            <select
+                              className="outline-depth-select"
+                              value={entry.depth}
+                              onChange={(event) => updateOutlineDepth(entry.id, Number.parseInt(event.currentTarget.value, 10))}
+                              title={tr("목차 들여쓰기(레벨) 설정", "Set nesting/indent level")}
+                            >
+                              {Array.from({ length: OUTLINE_MAX_DEPTH + 1 }, (_, depth) => (
+                                <option key={depth} value={depth}>
+                                  L{depth}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              className="ghost-btn micro-btn"
+                              type="button"
+                              onClick={() => jumpToOutlinePage(entry.pageNumber)}
+                              title={tr("설정된 페이지로 즉시 이동", "Go to the configured page")}
+                            >
+                              {tr("이동", "Go")}
+                            </button>
+                            <button
+                              className="ghost-btn micro-btn"
+                              type="button"
+                              onClick={() => removeOutlineEntry(entry.id)}
+                              title={tr("이 목차 항목 삭제", "Delete this outline item")}
+                            >
+                              {tr("삭제", "Del")}
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          )}
         </aside>
 
         <section className="panel preview-panel" ref={previewHostRef}>
@@ -1484,6 +2507,7 @@ function App() {
             <>
               <div
                 className={`preview-canvas-wrap ${isPreviewFocused ? "focused" : ""}`}
+                ref={previewInteractionRef}
                 tabIndex={0}
                 onFocus={() => setIsPreviewFocused(true)}
                 onBlur={() => setIsPreviewFocused(false)}
@@ -1491,7 +2515,83 @@ function App() {
                 onWheel={handlePreviewWheel}
                 onKeyDown={handleArrowPageNavigation}
               >
-                <canvas ref={previewCanvasRef} />
+                <div className="preview-tools">
+                  <button
+                    className="ghost-btn micro-btn"
+                    onClick={addManualOutlineAtActivePage}
+                    type="button"
+                    disabled={isBusy}
+                    title={tr("현재 페이지로 새 목차 항목을 추가합니다.", "Add a new outline entry for the current page.")}
+                  >
+                    {tr("현재추가", "Add Current")}
+                  </button>
+                  <button
+                    className={`ghost-btn micro-btn ${isAreaSelectMode ? "tab-active" : ""}`}
+                    onClick={toggleAreaSelectionMode}
+                    type="button"
+                    disabled={isBusy}
+                    title={tr("영역 드래그로 텍스트 추출", "Drag area to extract text")}
+                  >
+                    {isAreaSelectMode ? tr("영역선택ON", "Area ON") : tr("영역선택", "Area Select")}
+                  </button>
+                  <button
+                    className="ghost-btn micro-btn"
+                    onClick={() => void addSelectedPreviewTextToOutline()}
+                    type="button"
+                    disabled={isBusy || normalizeOutlineTitle(selectedPreviewText).length === 0}
+                    title={tr("선택 텍스트를 목차에 추가", "Add selected text to outline")}
+                  >
+                    {tr("선택→목차", "Sel->Outline")}
+                  </button>
+                  <span className="preview-selected-text" title={selectedPreviewText}>
+                    {normalizeOutlineTitle(selectedPreviewText).length > 0
+                      ? normalizeOutlineTitle(selectedPreviewText)
+                      : tr("본문에서 텍스트 선택 또는 영역 드래그", "Select text or drag area in page body")}
+                  </span>
+                </div>
+                <div
+                  className="preview-page-stack"
+                  style={{
+                    width: `${previewPageSize.width}px`,
+                    height: `${previewPageSize.height}px`,
+                  }}
+                >
+                  <canvas ref={previewCanvasRef} />
+                  <div
+                    className={`preview-text-layer ${isAreaSelectMode ? "area-mode" : ""}`}
+                    ref={previewTextLayerRef}
+                    onMouseDown={handlePreviewTextLayerMouseDown}
+                  >
+                    {previewTextSpans.map((span) => (
+                      <span
+                        key={span.id}
+                        className="preview-text-span"
+                        data-text={span.text}
+                        style={{
+                          left: `${span.left}px`,
+                          top: `${span.top}px`,
+                          width: `${span.width}px`,
+                          height: `${span.height}px`,
+                          fontSize: `${span.fontSize}px`,
+                          transform: `rotate(${span.angleDeg}deg)`,
+                        }}
+                      >
+                        {span.text}
+                      </span>
+                    ))}
+                    {normalizedPreviewSelectionRect ? (
+                      <div
+                        className="preview-selection-rect"
+                        style={{
+                          left: `${normalizedPreviewSelectionRect.left}px`,
+                          top: `${normalizedPreviewSelectionRect.top}px`,
+                          width: `${Math.max(0, normalizedPreviewSelectionRect.right - normalizedPreviewSelectionRect.left)}px`,
+                          height: `${Math.max(0, normalizedPreviewSelectionRect.bottom - normalizedPreviewSelectionRect.top)}px`,
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                </div>
               </div>
             </>
           ) : (
