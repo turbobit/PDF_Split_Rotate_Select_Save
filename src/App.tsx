@@ -2,497 +2,66 @@ import { join } from "@tauri-apps/api/path";
 import { ask, message, open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, type PDFRef, degrees } from "pdf-lib";
+import { PDFDocument } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
   type PDFDocumentProxy,
-  type PDFPageProxy,
   type RenderTask,
 } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AddPdfModal from "./components/AddPdfModal";
+import MergePdfModal from "./components/MergePdfModal";
+import {
+  APP_VERSION,
+  IMAGE_EXPORT_SCALE,
+  OUTLINE_LOAD_TIMEOUT_MS,
+  OUTLINE_MAX_DEPTH,
+  OUTLINE_SAVE_WAIT_POLL_MS,
+  OUTLINE_SAVE_WAIT_TIMEOUT_MS,
+  PROJECT_REPO_URL,
+  THUMB_ITEM_HEIGHT,
+  THUMB_OVERSCAN,
+  THUMB_PREFETCH,
+  THUMB_CACHE_LIMIT,
+  THUMBNAIL_CONCURRENCY,
+  THUMBNAIL_SCALE,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  ZOOM_STEP,
+  appendPageWithRotation,
+  applyOutlineEntriesToPdfDocument,
+  buildPreviewTextSpans,
+  clamp,
+  cloneBytes,
+  createExportUuid,
+  createOutlineEntryId,
+  detectLocale,
+  extractOutlineCandidatesFromText,
+  flattenPdfOutlineNodes,
+  formatError,
+  hasPdfHeader,
+  normalizeFileStem,
+  normalizeOutlineDepth,
+  normalizeOutlineTitle,
+  normalizeSelectionRect,
+  parsePageSelectionSpec,
+  parsePositiveInt,
+  renderPageToBlob,
+  type Locale,
+  type OutlineEntry,
+  type PdfOutlineNode,
+  type OutlinePanelMode,
+  type PreviewSelectionRect,
+  type PreviewTextSpan,
+  type SaveType,
+  type SidebarTab,
+  type StatusState,
+} from "./app/app-helpers";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
-
-const THUMBNAIL_SCALE = 0.22;
-const IMAGE_EXPORT_SCALE = 2;
-const THUMB_ITEM_HEIGHT = 206;
-const THUMB_OVERSCAN = 10;
-const THUMB_PREFETCH = 14;
-const THUMBNAIL_CONCURRENCY = 3;
-const THUMB_CACHE_LIMIT = 420;
-const OUTLINE_MAX_DEPTH = 4;
-const OUTLINE_TEXT_CANDIDATE_LIMIT = 80;
-const OUTLINE_LOAD_TIMEOUT_MS = 4500;
-const OUTLINE_SAVE_WAIT_TIMEOUT_MS = 5000;
-const OUTLINE_SAVE_WAIT_POLL_MS = 120;
-const PREVIEW_TEXT_SPAN_LIMIT = 2600;
-const ZOOM_MIN = 25;
-const ZOOM_MAX = 400;
-const ZOOM_STEP = 10;
-const APP_VERSION = "0.1.1";
-const PROJECT_REPO_URL = "https://github.com/turbobit/PDF_Split_Rotate_Select_Save";
-
-type SaveType = "pdf" | "png" | "jpg";
-type Locale = "ko" | "en";
-type SidebarTab = "thumbnails" | "outline";
-type OutlinePanelMode = "view" | "edit";
-type StatusState =
-  | { type: "ready" }
-  | { type: "loadingPdf" }
-  | { type: "loaded"; pages: number }
-  | { type: "savingPdf" }
-  | { type: "savedPdf"; pages: number }
-  | { type: "savingImages"; done: number; total: number }
-  | { type: "savedImages"; total: number }
-  | { type: "failed"; reason: "pdfLoad" | "pdfSave" | "imageSave" };
-
-type OutlineEntrySource = "pdf" | "text" | "manual";
-
-type OutlineEntry = {
-  id: string;
-  title: string;
-  pageNumber: number;
-  depth: number;
-  source: OutlineEntrySource;
-};
-
-type PdfOutlineNode = {
-  title: string;
-  dest: string | Array<unknown> | null;
-  items: PdfOutlineNode[];
-};
-
-type PdfPageRefLike = {
-  num: number;
-  gen: number;
-};
-
-type TextItemLike = {
-  str: string;
-};
-
-type OutlineTreeNode = {
-  title: string;
-  pageNumber: number;
-  children: OutlineTreeNode[];
-};
-
-type PreviewTextSpan = {
-  id: string;
-  text: string;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  fontSize: number;
-  angleDeg: number;
-};
-
-type PreviewSelectionRect = {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-};
-
-function detectLocale(): Locale {
-  const saved = window.localStorage.getItem("app.locale");
-  if (saved === "ko" || saved === "en") return saved;
-  return window.navigator.language.toLowerCase().startsWith("ko") ? "ko" : "en";
-}
-
-function normalizeFileStem(path: string): string {
-  const fileName = path.split(/[\\/]/).pop() ?? "document.pdf";
-  const stem = fileName.replace(/\.[^.]+$/, "");
-  return stem.trim().length > 0 ? stem : "document";
-}
-
-function formatError(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  return String(error);
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function parsePositiveInt(value: string): number | null {
-  const parsed = Number.parseInt(value.trim(), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return parsed;
-}
-
-function parsePageSelectionSpec(input: string, pageCount: number): Set<number> | null {
-  const result = new Set<number>();
-  const tokens = input
-    .split(",")
-    .map((token) => token.trim())
-    .filter((token) => token.length > 0);
-
-  if (tokens.length === 0) return result;
-
-  for (const token of tokens) {
-    const single = token.match(/^\d+$/);
-    if (single) {
-      const page = Number.parseInt(token, 10);
-      if (page >= 1 && page <= pageCount) result.add(page);
-      continue;
-    }
-
-    const range = token.match(/^(\d+)\s*-\s*(\d+)$/);
-    if (range) {
-      const a = Number.parseInt(range[1], 10);
-      const b = Number.parseInt(range[2], 10);
-      const start = Math.max(1, Math.min(a, b));
-      const end = Math.min(pageCount, Math.max(a, b));
-      for (let page = start; page <= end; page += 1) result.add(page);
-      continue;
-    }
-
-    return null;
-  }
-
-  return result;
-}
-
-function createExportUuid(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  const randomPart = Math.random().toString(16).slice(2);
-  const timePart = Date.now().toString(16);
-  return `${timePart}-${randomPart}`;
-}
-
-function createOutlineEntryId(): string {
-  return `outline-${createExportUuid()}`;
-}
-
-function normalizeOutlineDepth(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return clamp(Math.floor(value), 0, OUTLINE_MAX_DEPTH);
-}
-
-function normalizeOutlineTitle(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function isPdfPageRefLike(value: unknown): value is PdfPageRefLike {
-  if (!value || typeof value !== "object") return false;
-  const target = value as Record<string, unknown>;
-  return typeof target.num === "number" && typeof target.gen === "number";
-}
-
-function isTextItemLike(value: unknown): value is TextItemLike {
-  if (!value || typeof value !== "object") return false;
-  const target = value as Record<string, unknown>;
-  return typeof target.str === "string";
-}
-
-type RichTextItemLike = TextItemLike & {
-  transform: number[];
-  width: number;
-  height: number;
-};
-
-function isRichTextItemLike(value: unknown): value is RichTextItemLike {
-  if (!value || typeof value !== "object") return false;
-  const target = value as Record<string, unknown>;
-  return typeof target.str === "string"
-    && Array.isArray(target.transform)
-    && target.transform.length >= 6
-    && typeof target.width === "number"
-    && typeof target.height === "number";
-}
-
-function multiplyTransform(m1: number[], m2: number[]): [number, number, number, number, number, number] {
-  const a = m1[0] * m2[0] + m1[2] * m2[1];
-  const b = m1[1] * m2[0] + m1[3] * m2[1];
-  const c = m1[0] * m2[2] + m1[2] * m2[3];
-  const d = m1[1] * m2[2] + m1[3] * m2[3];
-  const e = m1[0] * m2[4] + m1[2] * m2[5] + m1[4];
-  const f = m1[1] * m2[4] + m1[3] * m2[5] + m1[5];
-  return [a, b, c, d, e, f];
-}
-
-function buildPreviewTextSpans(
-  textItems: unknown[],
-  viewportTransform: number[],
-  viewportScale: number,
-): PreviewTextSpan[] {
-  const spans: PreviewTextSpan[] = [];
-  let index = 0;
-  for (const item of textItems) {
-    if (!isRichTextItemLike(item)) continue;
-    const text = item.str;
-    if (text.trim().length === 0) continue;
-    const tx = multiplyTransform(viewportTransform, item.transform);
-    const fontHeight = Math.max(7, Math.hypot(tx[2], tx[3]));
-    const width = Math.max(2, Math.abs(item.width * viewportScale));
-    const height = Math.max(fontHeight, Math.abs(item.height * viewportScale));
-    const left = tx[4];
-    const top = tx[5] - height;
-    const angleDeg = (Math.atan2(tx[1], tx[0]) * 180) / Math.PI;
-    spans.push({
-      id: `span-${index}`,
-      text,
-      left,
-      top,
-      width,
-      height,
-      fontSize: fontHeight,
-      angleDeg,
-    });
-    index += 1;
-    if (spans.length >= PREVIEW_TEXT_SPAN_LIMIT) break;
-  }
-  return spans;
-}
-
-function normalizeSelectionRect(rect: PreviewSelectionRect): { left: number; top: number; right: number; bottom: number } {
-  return {
-    left: Math.min(rect.x1, rect.x2),
-    top: Math.min(rect.y1, rect.y2),
-    right: Math.max(rect.x1, rect.x2),
-    bottom: Math.max(rect.y1, rect.y2),
-  };
-}
-
-async function resolveOutlinePageNumber(
-  doc: PDFDocumentProxy,
-  destination: string | Array<unknown> | null,
-): Promise<number | null> {
-  let resolvedDestination: Array<unknown> | null = null;
-  if (typeof destination === "string") {
-    resolvedDestination = await doc.getDestination(destination);
-  } else if (Array.isArray(destination)) {
-    resolvedDestination = destination;
-  }
-  if (!resolvedDestination || resolvedDestination.length === 0) return null;
-  const target = resolvedDestination[0];
-  if (isPdfPageRefLike(target)) {
-    const pageIndex = await doc.getPageIndex(target);
-    return pageIndex + 1;
-  }
-  if (typeof target === "number" && Number.isFinite(target)) return target + 1;
-  return null;
-}
-
-async function flattenPdfOutlineNodes(
-  doc: PDFDocumentProxy,
-  nodes: PdfOutlineNode[],
-  depth: number,
-  entries: OutlineEntry[],
-): Promise<void> {
-  for (const node of nodes) {
-    const title = normalizeOutlineTitle(node.title ?? "");
-    const pageNumber = await resolveOutlinePageNumber(doc, node.dest);
-    if (title.length > 0 && pageNumber !== null && pageNumber > 0 && pageNumber <= doc.numPages) {
-      entries.push({
-        id: createOutlineEntryId(),
-        title,
-        pageNumber,
-        depth: normalizeOutlineDepth(depth),
-        source: "pdf",
-      });
-    }
-    if (Array.isArray(node.items) && node.items.length > 0) {
-      await flattenPdfOutlineNodes(doc, node.items, depth + 1, entries);
-    }
-  }
-}
-
-async function extractOutlineCandidatesFromText(
-  doc: PDFDocumentProxy,
-): Promise<Array<{ title: string; pageNumber: number }>> {
-  const candidates: Array<{ title: string; pageNumber: number }> = [];
-  const seen = new Set<string>();
-  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
-    const page = await doc.getPage(pageNumber);
-    const textContent = await page.getTextContent();
-    const tokens = textContent.items
-      .map((item) => (isTextItemLike(item) ? normalizeOutlineTitle(item.str) : ""))
-      .filter((token) => token.length > 0);
-    if (tokens.length === 0) continue;
-    const preferred = tokens.find((token) => token.length >= 4 && token.length <= 90 && !/^[\d\W]+$/.test(token));
-    const fallback = tokens.slice(0, 12).join(" ");
-    const normalized = normalizeOutlineTitle((preferred ?? fallback).replace(/^[\d.\-)\]\s]+/, ""));
-    if (normalized.length < 4) continue;
-    const title = normalized.length > 72 ? `${normalized.slice(0, 72).trimEnd()}...` : normalized;
-    const dedupeKey = `${pageNumber}:${title.toLowerCase()}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    candidates.push({ title, pageNumber });
-    if (candidates.length >= OUTLINE_TEXT_CANDIDATE_LIMIT) break;
-  }
-  return candidates;
-}
-
-function buildOutlineTree(entries: OutlineEntry[], pageCount: number): OutlineTreeNode[] {
-  const roots: OutlineTreeNode[] = [];
-  const stack: Array<{ children: OutlineTreeNode[] }> = [{ children: roots }];
-  for (const entry of entries) {
-    const title = normalizeOutlineTitle(entry.title);
-    if (title.length === 0) continue;
-    const pageNumber = clamp(Math.floor(entry.pageNumber), 1, Math.max(1, pageCount));
-    let depth = normalizeOutlineDepth(entry.depth);
-    if (depth > stack.length - 1) depth = stack.length - 1;
-    while (stack.length - 1 > depth) stack.pop();
-    const node: OutlineTreeNode = { title, pageNumber, children: [] };
-    stack[stack.length - 1].children.push(node);
-    stack.push({ children: node.children });
-  }
-  return roots;
-}
-
-function countOutlineDescendants(node: OutlineTreeNode): number {
-  return node.children.length + node.children.reduce((sum, child) => sum + countOutlineDescendants(child), 0);
-}
-
-function countOutlineVisible(nodes: OutlineTreeNode[]): number {
-  return nodes.length + nodes.reduce((sum, node) => sum + countOutlineDescendants(node), 0);
-}
-
-function applyOutlineEntriesToPdfDocument(outputDocument: PDFDocument, entries: OutlineEntry[]): void {
-  if (outputDocument.getPageCount() === 0) {
-    outputDocument.catalog.delete(PDFName.of("Outlines"));
-    return;
-  }
-
-  const tree = buildOutlineTree(entries, outputDocument.getPageCount());
-  if (tree.length === 0) {
-    outputDocument.catalog.delete(PDFName.of("Outlines"));
-    return;
-  }
-
-  const writeLevel = (parentRef: PDFRef, nodes: OutlineTreeNode[]): { first: PDFRef; last: PDFRef } | null => {
-    let first: PDFRef | null = null;
-    let last: PDFRef | null = null;
-    let previousRef: PDFRef | null = null;
-    let previousDict: PDFDict | null = null;
-
-    for (const node of nodes) {
-      const pageRef = outputDocument.getPage(node.pageNumber - 1).ref;
-      const itemDict = outputDocument.context.obj({
-        Title: PDFHexString.fromText(node.title),
-        Parent: parentRef,
-        Dest: outputDocument.context.obj([pageRef, PDFName.of("Fit")]),
-      }) as PDFDict;
-      const itemRef = outputDocument.context.register(itemDict);
-
-      if (!first) first = itemRef;
-      if (previousRef && previousDict) {
-        previousDict.set(PDFName.of("Next"), itemRef);
-        itemDict.set(PDFName.of("Prev"), previousRef);
-      }
-
-      if (node.children.length > 0) {
-        const childLinks = writeLevel(itemRef, node.children);
-        if (childLinks) {
-          itemDict.set(PDFName.of("First"), childLinks.first);
-          itemDict.set(PDFName.of("Last"), childLinks.last);
-          itemDict.set(PDFName.of("Count"), PDFNumber.of(countOutlineDescendants(node)));
-        }
-      }
-
-      previousRef = itemRef;
-      previousDict = itemDict;
-      last = itemRef;
-    }
-
-    if (!first || !last) return null;
-    return { first, last };
-  };
-
-  const outlinesDict = outputDocument.context.obj({ Type: PDFName.of("Outlines") }) as PDFDict;
-  const outlinesRef = outputDocument.context.register(outlinesDict);
-  const links = writeLevel(outlinesRef, tree);
-  if (!links) {
-    outputDocument.catalog.delete(PDFName.of("Outlines"));
-    return;
-  }
-
-  outlinesDict.set(PDFName.of("First"), links.first);
-  outlinesDict.set(PDFName.of("Last"), links.last);
-  outlinesDict.set(PDFName.of("Count"), PDFNumber.of(countOutlineVisible(tree)));
-  outputDocument.catalog.set(PDFName.of("Outlines"), outlinesRef);
-  outputDocument.catalog.set(PDFName.of("PageMode"), PDFName.of("UseOutlines"));
-}
-
-function hasPdfHeader(bytes: Uint8Array): boolean {
-  return bytes.length >= 5
-    && bytes[0] === 0x25
-    && bytes[1] === 0x50
-    && bytes[2] === 0x44
-    && bytes[3] === 0x46
-    && bytes[4] === 0x2d;
-}
-
-function cloneBytes(bytes: Uint8Array): Uint8Array {
-  return new Uint8Array(bytes);
-}
-
-function normalizeRotationDegrees(value: number): number {
-  return ((value % 360) + 360) % 360;
-}
-
-async function appendPageWithRotation(
-  outputDocument: PDFDocument,
-  sourceDocument: PDFDocument,
-  sourcePageIndex: number,
-  extraRotation: number,
-): Promise<void> {
-  const [copied] = await outputDocument.copyPages(sourceDocument, [sourcePageIndex]);
-  const currentRotation = normalizeRotationDegrees(copied.getRotation().angle);
-  const finalRotation = normalizeRotationDegrees(currentRotation + extraRotation);
-  copied.setRotation(degrees(finalRotation));
-  outputDocument.addPage(copied);
-}
-
-async function canvasToBlob(
-  canvas: HTMLCanvasElement,
-  mimeType: "image/png" | "image/jpeg",
-  quality?: number,
-): Promise<Blob> {
-  return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) {
-          reject(new Error("Canvas blob conversion failed."));
-          return;
-        }
-        resolve(blob);
-      },
-      mimeType,
-      quality,
-    );
-  });
-}
-
-async function renderPageToBlob(
-  page: PDFPageProxy,
-  scale: number,
-  mimeType: "image/png" | "image/jpeg",
-  quality?: number,
-  rotation = 0,
-): Promise<Blob> {
-  const viewport = page.getViewport({ scale, rotation });
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.floor(viewport.width));
-  canvas.height = Math.max(1, Math.floor(viewport.height));
-  const context = canvas.getContext("2d", { alpha: false });
-  if (!context) throw new Error("Cannot acquire canvas context.");
-  const task = page.render({ canvas, canvasContext: context, viewport, intent: "print" });
-  await task.promise;
-  const blob = await canvasToBlob(canvas, mimeType, quality);
-  canvas.width = 0;
-  canvas.height = 0;
-  page.cleanup();
-  return blob;
-}
 
 function App() {
   const [locale, setLocale] = useState<Locale>(detectLocale);
@@ -2004,6 +1573,19 @@ function App() {
     () => (previewSelectionRect ? normalizeSelectionRect(previewSelectionRect) : null),
     [previewSelectionRect],
   );
+  const addPdfLabel = useMemo(() => (addPdfPath ? normalizeFileStem(addPdfPath) : "-"), [addPdfPath]);
+  const hasCurrentPdf = pdfDoc !== null;
+  const handleMergeDragStart = useCallback((path: string, index: number) => {
+    setMergeDraggingPath(path);
+    setMergeDraggingIndex(index);
+    setMergeDropPath(null);
+  }, []);
+  const applyMergeModal = useCallback(() => {
+    void handleApplyMergePdfs();
+  }, [handleApplyMergePdfs]);
+  const applyAddModal = useCallback(() => {
+    void handleApplyAddPdf();
+  }, [handleApplyAddPdf]);
 
   return (
     <div className="app-shell">
@@ -2600,151 +2182,36 @@ function App() {
         </section>
       </main>
 
-      {showMergePdfModal ? (
-        <div className="modal-backdrop" onClick={() => closeMergePdfModal()}>
-          <section className="panel add-pdf-modal merge-pdf-modal" onClick={(event) => event.stopPropagation()}>
-            <h2>{tr("PDF 병합", "Merge PDFs")}</h2>
-            <p>{tr("드래그앤드랍으로 병합 순서를 정하세요.", "Drag and drop to reorder merge files.")}</p>
-            <div className="modal-row">
-              <span>{tr("삽입 위치", "Insert position")}</span>
-              <label>
-                <input
-                  type="radio"
-                  name="merge-position"
-                  value="front"
-                  checked={mergeInsertPosition === "front"}
-                  onChange={() => setMergeInsertPosition("front")}
-                  disabled={isAddingPdf}
-                />
-                {tr("앞쪽", "Front")}
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="merge-position"
-                  value="back"
-                  checked={mergeInsertPosition === "back"}
-                  onChange={() => setMergeInsertPosition("back")}
-                  disabled={isAddingPdf}
-                />
-                {tr("뒤쪽", "Back")}
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="merge-position"
-                  value="beforeActive"
-                  checked={mergeInsertPosition === "beforeActive"}
-                  onChange={() => setMergeInsertPosition("beforeActive")}
-                  disabled={isAddingPdf || !pdfDoc}
-                />
-                {tr("현재 앞", "Before current")}
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="merge-position"
-                  value="afterActive"
-                  checked={mergeInsertPosition === "afterActive"}
-                  onChange={() => setMergeInsertPosition("afterActive")}
-                  disabled={isAddingPdf || !pdfDoc}
-                />
-                {tr("현재 뒤", "After current")}
-              </label>
-            </div>
-            <div className="merge-list" ref={mergeListRef}>
-              {mergePdfPaths.map((path, index) => (
-                <article
-                  key={path}
-                  className={`merge-item ${mergeDraggingPath === path ? "dragging" : ""} ${mergeDropPath === path ? "drop-target" : ""}`}
-                >
-                  <span
-                    className="merge-drag-handle"
-                    title={tr("여기를 잡고 드래그하여 순서 이동", "Drag here to reorder")}
-                    aria-label={tr("드래그 핸들", "Drag handle")}
-                    onMouseDown={(event) => {
-                      if (isAddingPdf) return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setMergeDraggingPath(path);
-                      setMergeDraggingIndex(index);
-                      setMergeDropPath(null);
-                    }}
-                  >
-                    |||
-                  </span>
-                  <span className="merge-index">{index + 1}</span>
-                  <span className="merge-name">{normalizeFileStem(path)}</span>
-                </article>
-              ))}
-            </div>
-            <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => closeMergePdfModal()} disabled={isAddingPdf} type="button">
-                {tr("취소", "Cancel")}
-              </button>
-              <button className="primary-btn" onClick={() => void handleApplyMergePdfs()} disabled={isAddingPdf || mergePdfPaths.length === 0} type="button">
-                {isAddingPdf ? tr("병합 중...", "Merging...") : tr("병합 실행", "Merge")}
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <MergePdfModal
+        isOpen={showMergePdfModal}
+        tr={tr}
+        mergeInsertPosition={mergeInsertPosition}
+        setMergeInsertPosition={setMergeInsertPosition}
+        isAddingPdf={isAddingPdf}
+        hasCurrentPdf={hasCurrentPdf}
+        mergePdfPaths={mergePdfPaths}
+        mergeDraggingPath={mergeDraggingPath}
+        mergeDropPath={mergeDropPath}
+        mergeListRef={mergeListRef}
+        normalizeFileStem={normalizeFileStem}
+        onStartDrag={handleMergeDragStart}
+        onClose={closeMergePdfModal}
+        onApply={applyMergeModal}
+      />
 
-      {showAddPdfModal ? (
-        <div className="modal-backdrop" onClick={() => closeAddPdfModal()}>
-          <section className="panel add-pdf-modal" onClick={(event) => event.stopPropagation()}>
-            <h2>{tr("PDF 추가", "Add PDF")}</h2>
-            <p>
-              {tr("파일", "File")}: <strong>{addPdfPath ? normalizeFileStem(addPdfPath) : "-"}</strong>
-              {" · "}
-              {tr("페이지", "Pages")} {addPdfPageCount}
-            </p>
-            <div className="modal-row">
-              <span>{tr("추가 위치", "Insert position")}</span>
-              <label>
-                <input
-                  type="radio"
-                  name="add-position"
-                  value="front"
-                  checked={addInsertPosition === "front"}
-                  onChange={() => setAddInsertPosition("front")}
-                  disabled={isAddingPdf}
-                />
-                {tr("앞쪽으로", "To front")}
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="add-position"
-                  value="back"
-                  checked={addInsertPosition === "back"}
-                  onChange={() => setAddInsertPosition("back")}
-                  disabled={isAddingPdf}
-                />
-                {tr("뒤쪽으로", "To back")}
-              </label>
-            </div>
-            <label className="modal-range-field">
-              <span>{tr("추가 범위", "Pages to add")}</span>
-              <input
-                value={addRangeInput}
-                onChange={(event) => setAddRangeInput(event.currentTarget.value)}
-                placeholder="1-3, 5, 9"
-                disabled={isAddingPdf}
-              />
-              <small>{tr("비워두면 전체 페이지를 추가합니다.", "Leave empty to add all pages.")}</small>
-            </label>
-            <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => closeAddPdfModal()} disabled={isAddingPdf} type="button">
-                {tr("취소", "Cancel")}
-              </button>
-              <button className="primary-btn" onClick={() => void handleApplyAddPdf()} disabled={isAddingPdf} type="button">
-                {isAddingPdf ? tr("추가 중...", "Adding...") : tr("추가 실행", "Add")}
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <AddPdfModal
+        isOpen={showAddPdfModal}
+        tr={tr}
+        addPdfLabel={addPdfLabel}
+        addPdfPageCount={addPdfPageCount}
+        addInsertPosition={addInsertPosition}
+        setAddInsertPosition={setAddInsertPosition}
+        addRangeInput={addRangeInput}
+        setAddRangeInput={setAddRangeInput}
+        isAddingPdf={isAddingPdf}
+        onClose={closeAddPdfModal}
+        onApply={applyAddModal}
+      />
     </div>
   );
 }
