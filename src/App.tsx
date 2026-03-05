@@ -1385,7 +1385,27 @@ function App() {
           <div className="sidebar-head">
             <strong>{pdfPath ? normalizeFileStem(pdfPath) : tr("불러온 PDF 없음", "No PDF loaded")}</strong>
             <span>{tr("대용량 PDF도 스크롤 구간만 썸네일 렌더링", "Only visible range thumbnails are rendered for large PDFs")}</span>
-            <span>{tr("썸네일", "Thumbnails")} {loadedThumbCount}/{pageCount} ({tr("대기/처리", "queued/working")} {thumbQueueCount})</span>
+            <div className="sidebar-info-row">
+              <span className="sidebar-info-text">{tr("썸네일", "Thumbnails")} {loadedThumbCount}/{pageCount} ({tr("대기/처리", "queued/working")} {thumbQueueCount})</span>
+              <div className="sidebar-buttons">
+                <button
+                  className="ghost-btn micro-btn"
+                  onClick={() => setSelectedPages(new Set(pageNumbers))}
+                  disabled={!pdfDoc || isBusy || pageCount === 0}
+                  title={tr("전체 선택", "Select all")}
+                >
+                  {tr("전체", "All")}
+                </button>
+                <button
+                  className="ghost-btn micro-btn"
+                  onClick={() => setSelectedPages(new Set())}
+                  disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+                  title={tr("선택 취소", "Clear selection")}
+                >
+                  {tr("취소", "Clear")}
+                </button>
+              </div>
+            </div>
           </div>
           <div
             className="thumbnail-viewport"
@@ -1432,8 +1452,8 @@ function App() {
                           type="button"
                           className="thumb-trash-btn"
                           onClick={() => removePageFromSelection(pageNumber)}
-                          disabled={!selectedPages.has(pageNumber) || isBusy}
-                          title={tr("선택 해제", "Remove from selection")}
+                          disabled={isBusy}
+                          title={selectedPages.has(pageNumber) ? tr("선택 해제", "Remove from selection") : tr("선택되지 않음", "Not selected")}
                         >
                           {tr("휴지통", "Trash")}
                         </button>

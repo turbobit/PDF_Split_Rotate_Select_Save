@@ -323,8 +323,9 @@ input:disabled {
 .sidebar-head {
   padding: 8px;
   border-bottom: 1px solid var(--line);
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   font-size: 12px;
   color: var(--muted);
 }
@@ -332,6 +333,31 @@ input:disabled {
 .sidebar-head strong {
   color: var(--ink);
   font-size: 14px;
+}
+
+.sidebar-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-info-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.micro-btn {
+  padding: 2px 4px;
+  min-width: 24px;
+  font-size: 11px;
 }
 
 .thumbnail-viewport {
