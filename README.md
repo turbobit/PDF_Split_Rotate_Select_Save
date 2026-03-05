@@ -2,6 +2,8 @@
 
 Desktop app built with Tauri + React for fast local PDF page extraction and reordering.
 
+<img  alt="image" src="https://github.com/user-attachments/assets/214043cd-2b4a-4394-b6ef-111a3515e244" />
+
 ## Features
 
 - Open a PDF and preview pages with virtualized thumbnails.
