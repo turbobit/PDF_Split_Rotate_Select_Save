@@ -27,7 +27,7 @@ const ZOOM_MIN = 25;
 const ZOOM_MAX = 400;
 const ZOOM_STEP = 10;
 const APP_VERSION = "0.1.1";
-const PROJECT_REPO_URL = "https://github.com/turbobit/pdf_split";
+const PROJECT_REPO_URL = "https://github.com/turbobit/PDF_Split_Rotate_Select_Save";
 
 type SaveType = "pdf" | "png" | "jpg";
 type Locale = "ko" | "en";
