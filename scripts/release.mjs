@@ -235,13 +235,16 @@ for (const artifact of artifacts) {
 console.log(`[release] Checking for existing GitHub release: ${tag}`);
 const hasRelease = runQuiet(`gh release view ${tag}`);
 const previousTag = getPreviousTag(tag);
+const sameVersionBaseTag = previousTag ?? tag;
 const compareLine = sameVersionUpdate
-  ? `- 변경 범위(동일 버전 재릴리스): \`${tag}..HEAD\``
+  ? previousTag
+    ? `- 변경 범위(동일 버전 재릴리스): \`${previousTag}..HEAD\``
+    : `- 변경 범위(동일 버전 재릴리스): \`${tag}..HEAD\``
   : previousTag
     ? `- 변경 범위: \`${previousTag} -> ${tag}\``
     : "- 변경 범위: 이전 태그를 찾지 못해 최근 커밋 기준으로 생성";
 const commitLines = sameVersionUpdate
-  ? getCommitLinesByRange(`${tag}..HEAD`)
+  ? getCommitLinesByRange(`${sameVersionBaseTag}..HEAD`)
   : getCommitLines(previousTag, tag);
 const notes = buildKoreanReleaseNotes({
   tag,
