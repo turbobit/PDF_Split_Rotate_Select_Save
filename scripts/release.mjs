@@ -87,9 +87,8 @@ function ensureTagSynced(tag) {
     run(`git tag ${tag}`);
     localTagCommit = headCommit;
   } else if (localTagCommit !== headCommit) {
-    console.error(`[release] Local tag ${tag} points to ${localTagCommit.slice(0, 7)} but HEAD is ${headCommit.slice(0, 7)}.`);
-    console.error(`[release] Bump version or move/create the correct tag before release.`);
-    process.exit(1);
+    console.log(`[release] Local tag ${tag} points to ${localTagCommit.slice(0, 7)} while HEAD is ${headCommit.slice(0, 7)}.`);
+    console.log("[release] Continuing in same-version update mode.");
   }
 
   const remoteTagLine = tryRunCapture(`git ls-remote --tags origin refs/tags/${tag}`);
@@ -107,6 +106,21 @@ function ensureTagSynced(tag) {
   }
 
   run("git fetch --tags --force");
+
+  return { headCommit, tagCommit: localTagCommit };
+}
+
+function getCommitLinesByRange(range) {
+  try {
+    const output = runCapture(`git log ${range} --pretty=format:%s`);
+    if (!output) return [];
+    return output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function getPreviousTag(currentTag) {
@@ -142,11 +156,8 @@ function getCommitLines(previousTag, currentTag) {
   }
 }
 
-function buildKoreanReleaseNotes({ tag, previousTag, commits, artifacts }) {
+function buildKoreanReleaseNotes({ tag, compareLine, commits, artifacts }) {
   const date = new Date().toISOString().slice(0, 10);
-  const compareLine = previousTag
-    ? `- 변경 범위: \`${previousTag} -> ${tag}\``
-    : "- 변경 범위: 이전 태그를 찾지 못해 최근 커밋 기준으로 생성";
   const commitSection = commits.length > 0
     ? commits.map((line) => `- ${line}`).join("\n")
     : "- 커밋 메시지 기반 변경 내역을 찾지 못했습니다.";
@@ -171,6 +182,28 @@ function buildKoreanReleaseNotes({ tag, previousTag, commits, artifacts }) {
   ].join("\n");
 }
 
+function getReleaseAssetNames(tag) {
+  try {
+    const json = runCapture(`gh release view ${tag} --json assets`);
+    const parsed = JSON.parse(json);
+    const assets = Array.isArray(parsed.assets) ? parsed.assets : [];
+    return assets
+      .map((asset) => asset?.name)
+      .filter((name) => typeof name === "string" && name.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function deleteAllReleaseAssets(tag) {
+  const assetNames = getReleaseAssetNames(tag);
+  if (assetNames.length === 0) return;
+  console.log(`[release] Removing ${assetNames.length} existing release asset(s)...`);
+  for (const assetName of assetNames) {
+    run(`gh release delete-asset ${tag} ${quoteArg(assetName)} --yes`);
+  }
+}
+
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 
 const version = packageJson.version;
@@ -182,7 +215,8 @@ if (!version) {
 const tag = `v${version}`;
 const releaseTitle = `PDF Split Rotate Select Save ${tag} 릴리스`;
 
-ensureTagSynced(tag);
+const { headCommit, tagCommit } = ensureTagSynced(tag);
+const sameVersionUpdate = tagCommit && tagCommit !== headCommit;
 
 console.log(`[release] Building desktop bundles for ${tag}...`);
 run("npm run tauri build");
@@ -201,10 +235,17 @@ for (const artifact of artifacts) {
 console.log(`[release] Checking for existing GitHub release: ${tag}`);
 const hasRelease = runQuiet(`gh release view ${tag}`);
 const previousTag = getPreviousTag(tag);
-const commitLines = getCommitLines(previousTag, tag);
+const compareLine = sameVersionUpdate
+  ? `- 변경 범위(동일 버전 재릴리스): \`${tag}..HEAD\``
+  : previousTag
+    ? `- 변경 범위: \`${previousTag} -> ${tag}\``
+    : "- 변경 범위: 이전 태그를 찾지 못해 최근 커밋 기준으로 생성";
+const commitLines = sameVersionUpdate
+  ? getCommitLinesByRange(`${tag}..HEAD`)
+  : getCommitLines(previousTag, tag);
 const notes = buildKoreanReleaseNotes({
   tag,
-  previousTag,
+  compareLine,
   commits: commitLines,
   artifacts,
 });
@@ -216,6 +257,7 @@ const artifactArgs = artifacts.map(quotePath).join(" ");
 try {
   if (hasRelease) {
     console.log(`[release] Release ${tag} exists. Updating title/notes and uploading assets...`);
+    deleteAllReleaseAssets(tag);
     run(`gh release edit ${tag} --title ${quoteArg(releaseTitle)} --notes-file ${quotePath(notesFilePath)}`);
     run(`gh release upload ${tag} ${artifactArgs} --clobber`);
   } else {

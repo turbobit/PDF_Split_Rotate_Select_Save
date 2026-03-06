@@ -80,7 +80,9 @@ Release script behavior:
 - fetches and syncs tags automatically (`git fetch --tags --force`)
 - creates local tag `v<version>` on `HEAD` if missing
 - pushes tag to `origin` if missing remotely
-- stops with an error if local/remote tag points to a different commit than `HEAD`
+- if the same version tag already exists on an older commit, it runs in same-version update mode:
+  - collects commit messages from `v<version>..HEAD` for release notes
+  - removes existing release assets and uploads freshly built assets
 
 ## Project Structure
 
