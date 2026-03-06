@@ -99,8 +99,14 @@ input {
   padding: 6px 8px;
   display: flex;
   justify-content: center;
-  gap: 8px;
+  gap: 2px;
   flex-wrap: wrap;
+}
+
+.toolbar-line-break {
+  flex-basis: 100%;
+  height: 0;
+  margin: 0;
 }
 
 .action-group {
@@ -130,6 +136,10 @@ input {
   bottom: 2px;
   width: 1px;
   background: var(--line);
+}
+
+.save-block::after {
+  display: none;
 }
 
 .save-block {

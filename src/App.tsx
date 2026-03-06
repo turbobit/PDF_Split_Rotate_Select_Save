@@ -1725,6 +1725,7 @@ function App() {
             </label>
             <button className="primary-btn" onClick={() => void handleSaveSelection()} disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}>{tr("선택 저장", "Save selection")}</button>
           </div>
+          <div className="toolbar-line-break" aria-hidden="true" />
 
           <div className="action-group toolbar-block view-block">
             <button className="ghost-btn" onClick={() => movePage(-1)} disabled={!pdfDoc || isBusy || activePage <= 1}>{tr("이전", "Previous")}</button>
