@@ -67,6 +67,48 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function tryRunCapture(command) {
+  try {
+    return runCapture(command);
+  } catch {
+    return null;
+  }
+}
+
+function ensureTagSynced(tag) {
+  console.log(`[release] Syncing git tags...`);
+  run("git fetch --tags --force");
+
+  const headCommit = runCapture("git rev-parse HEAD");
+  let localTagCommit = tryRunCapture(`git rev-list -n 1 ${tag}`);
+
+  if (!localTagCommit) {
+    console.log(`[release] Local tag ${tag} does not exist. Creating it on HEAD (${headCommit.slice(0, 7)})...`);
+    run(`git tag ${tag}`);
+    localTagCommit = headCommit;
+  } else if (localTagCommit !== headCommit) {
+    console.error(`[release] Local tag ${tag} points to ${localTagCommit.slice(0, 7)} but HEAD is ${headCommit.slice(0, 7)}.`);
+    console.error(`[release] Bump version or move/create the correct tag before release.`);
+    process.exit(1);
+  }
+
+  const remoteTagLine = tryRunCapture(`git ls-remote --tags origin refs/tags/${tag}`);
+  const remoteTagCommit = remoteTagLine ? remoteTagLine.split(/\s+/)[0] : null;
+
+  if (!remoteTagCommit) {
+    console.log(`[release] Remote tag ${tag} not found. Pushing tag...`);
+    run(`git push origin ${tag}`);
+  } else if (remoteTagCommit !== localTagCommit) {
+    console.error(`[release] Remote tag ${tag} (${remoteTagCommit.slice(0, 7)}) differs from local (${localTagCommit.slice(0, 7)}).`);
+    console.error(`[release] Resolve tag mismatch before running release.`);
+    process.exit(1);
+  } else {
+    console.log(`[release] Tag ${tag} is already synced to origin.`);
+  }
+
+  run("git fetch --tags --force");
+}
+
 function getPreviousTag(currentTag) {
   try {
     const output = runCapture("git tag --sort=version:refname");
@@ -139,6 +181,8 @@ if (!version) {
 
 const tag = `v${version}`;
 const releaseTitle = `PDF Split Rotate Select Save ${tag} 릴리스`;
+
+ensureTagSynced(tag);
 
 console.log(`[release] Building desktop bundles for ${tag}...`);
 run("npm run tauri build");

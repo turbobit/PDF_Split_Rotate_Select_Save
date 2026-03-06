@@ -72,6 +72,18 @@ npm run build
 npm run tauri build
 ```
 
+릴리스 생성/업로드:
+
+```bash
+npm run release
+```
+
+릴리스 스크립트 동작:
+- 태그 자동 동기화 (`git fetch --tags --force`)
+- 로컬 `v<version>` 태그가 없으면 `HEAD`에 자동 생성
+- 원격 태그가 없으면 `origin`에 자동 푸시
+- 태그가 `HEAD`와 다른 커밋을 가리키면 에러로 중단
+
 ## 프로젝트 구조
 
 - `src/App.tsx`: 메인 UI 및 PDF 처리 로직

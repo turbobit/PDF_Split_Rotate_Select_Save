@@ -76,6 +76,12 @@ Build and publish GitHub Release (create/update by `package.json` version tag):
 npm run release
 ```
 
+Release script behavior:
+- fetches and syncs tags automatically (`git fetch --tags --force`)
+- creates local tag `v<version>` on `HEAD` if missing
+- pushes tag to `origin` if missing remotely
+- stops with an error if local/remote tag points to a different commit than `HEAD`
+
 ## Project Structure
 
 - `src/App.tsx`: main UI and PDF workflow logic
