@@ -1,4 +1,6 @@
 import { join } from "@tauri-apps/api/path";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ask, message, open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -102,6 +104,7 @@ function App() {
   const [errorText, setErrorText] = useState<string | null>(null);
   const [toastText, setToastText] = useState<string | null>(null);
   const [showHelpInfo, setShowHelpInfo] = useState(false);
+  const [isToolbarCollapsed, setIsToolbarCollapsed] = useState<boolean>(() => window.localStorage.getItem("app.toolbarCollapsed") === "1");
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<number, string>>({});
@@ -196,6 +199,10 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem("app.locale", locale);
   }, [locale]);
+
+  useEffect(() => {
+    window.localStorage.setItem("app.toolbarCollapsed", isToolbarCollapsed ? "1" : "0");
+  }, [isToolbarCollapsed]);
 
   useEffect(() => {
     pageRotationsRef.current = pageRotations;
@@ -755,49 +762,44 @@ function App() {
     };
   }, [pdfDoc, activePage, pageRotations, previewSize, previewZoom, tr]);
 
-  const handleOpenPdf = useCallback(async () => {
-    setErrorText(null);
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      title: tr("PDF 파일 선택", "Select PDF file"),
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-    });
-    if (!selected || Array.isArray(selected)) return;
+  const resetPdfWorkspace = useCallback(async () => {
+    clearOutlineDragState();
+    clearThumbnailPipeline();
+    await replacePdfDocument(null);
+    clearPreviewCanvas();
+    setPdfPath(null);
+    setPdfBytes(null);
+    setPageCount(0);
+    setPageOrder([]);
+    setActivePage(1);
+    setPageInput("1");
+    setSelectedPages(new Set());
+    setSidebarTab("thumbnails");
+    setOutlinePanelMode("view");
+    setOutlineEntries([]);
+    setIsLoadingOutline(false);
+    setIsGeneratingOutline(false);
+    setQuickSelectInput("");
+    setRangeFromInput("");
+    setRangeToInput("");
+    setPreviewZoom(100);
+    setIsAreaSelectMode(false);
+    setPageRotations({});
+    pageRotationsRef.current = {};
+  }, [clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
+
+  const loadPdfFromPath = useCallback(async (path: string) => {
     setIsLoadingPdf(true);
     setStatus({ type: "loadingPdf" });
     try {
-      clearOutlineDragState();
-      clearThumbnailPipeline();
-      await replacePdfDocument(null);
-      clearPreviewCanvas();
-      setPdfPath(null);
-      setPdfBytes(null);
-      setPageCount(0);
-      setPageOrder([]);
-      setActivePage(1);
-      setPageInput("1");
-      setSelectedPages(new Set());
-      setSidebarTab("thumbnails");
-      setOutlinePanelMode("view");
-      setOutlineEntries([]);
-      setIsLoadingOutline(false);
-      setIsGeneratingOutline(false);
-      setQuickSelectInput("");
-      setRangeFromInput("");
-      setRangeToInput("");
-      setPreviewZoom(100);
-      setIsAreaSelectMode(false);
-      setPageRotations({});
-      pageRotationsRef.current = {};
-
-      const fileBytes = new Uint8Array(await readFile(selected));
+      await resetPdfWorkspace();
+      const fileBytes = new Uint8Array(await readFile(path));
       const previewBytes = cloneBytes(fileBytes);
       const stateBytes = cloneBytes(fileBytes);
       const task = getDocument({ data: previewBytes });
       const loadedDoc = await task.promise;
       await replacePdfDocument(loadedDoc);
-      setPdfPath(selected);
+      setPdfPath(path);
       setPdfBytes(stateBytes);
       setPageCount(loadedDoc.numPages);
       setPageOrder(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1));
@@ -813,13 +815,54 @@ function App() {
       setPageRotations({});
       pageRotationsRef.current = {};
       setStatus({ type: "loaded", pages: loadedDoc.numPages });
+      return true;
     } catch (error) {
       setStatus({ type: "failed", reason: "pdfLoad" });
       setErrorText(`${tr("PDF 로딩 실패", "PDF loading failed")}: ${formatError(error)}`);
+      return false;
     } finally {
       setIsLoadingPdf(false);
     }
-  }, [clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument, tr]);
+  }, [replacePdfDocument, resetPdfWorkspace, tr]);
+
+  const handleOpenPdf = useCallback(async () => {
+    setErrorText(null);
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: tr("PDF 파일 선택", "Select PDF file"),
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (!selected || Array.isArray(selected)) return;
+    await loadPdfFromPath(selected);
+  }, [loadPdfFromPath, tr]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const initialPath = searchParams.get("open");
+    if (initialPath) {
+      void loadPdfFromPath(initialPath);
+    }
+    void (async () => {
+      try {
+        const pendingPath = await invoke<string | null>("take_next_pending_pdf_path");
+        if (pendingPath) {
+          await loadPdfFromPath(pendingPath);
+        }
+      } catch {
+        // Ignore if command is temporarily unavailable.
+      }
+    })();
+    let unlisten: (() => void) | null = null;
+    void listen<string>("pdf-open-request", (event) => {
+      void loadPdfFromPath(event.payload);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [loadPdfFromPath]);
 
   const handleOpenAddPdfModal = useCallback(async () => {
     if (!pdfDoc || !pdfBytes || isBusy) return;
@@ -1163,31 +1206,9 @@ function App() {
 
   const handleClosePdf = useCallback(async () => {
     setErrorText(null);
-    clearOutlineDragState();
-    clearThumbnailPipeline();
-    await replacePdfDocument(null);
-    clearPreviewCanvas();
-    setPdfPath(null);
-    setPdfBytes(null);
-    setPageCount(0);
-    setPageOrder([]);
-    setActivePage(1);
-    setPageInput("1");
-    setSelectedPages(new Set());
-    setSidebarTab("thumbnails");
-    setOutlinePanelMode("view");
-    setOutlineEntries([]);
-    setIsLoadingOutline(false);
-    setIsGeneratingOutline(false);
-    setQuickSelectInput("");
-    setRangeFromInput("");
-    setRangeToInput("");
-    setPreviewZoom(100);
-    setIsAreaSelectMode(false);
-    setPageRotations({});
-    pageRotationsRef.current = {};
+    await resetPdfWorkspace();
     setStatus({ type: "ready" });
-  }, [clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
+  }, [resetPdfWorkspace]);
 
   const togglePageSelection = useCallback((pageNumber: number) => {
     setSelectedPages((prev) => {
@@ -1590,20 +1611,34 @@ function App() {
   return (
     <div className="app-shell">
       <section className="toolbar-grid">
-        <div className="panel toolbar-row">
-          <div className="action-group toolbar-block file-block">
-            <button className="primary-btn" onClick={() => void handleOpenPdf()} disabled={isBusy}>{tr("PDF 열기", "Open PDF")}</button>
-            <button className="ghost-btn" onClick={() => void handleOpenAddPdfModal()} disabled={!pdfDoc || !pdfBytes || isBusy}>
-              {tr("PDF 추가", "Add PDF")}
-            </button>
-            <button className="ghost-btn" onClick={() => void handleMergePdfs()} disabled={isBusy}>
-              {tr("PDF 병합", "Merge PDFs")}
-            </button>
-            {pdfDoc ? (
-              <button className="ghost-btn" onClick={() => void handleClosePdf()} disabled={isBusy}>
-                {tr("닫기", "Close")}
+        <div className="panel toolbar-head-row">
+          <div className="toolbar-head-status">
+            <div className="action-group head-file-actions">
+              <button className="primary-btn" onClick={() => void handleOpenPdf()} disabled={isBusy}>{tr("PDF 열기", "Open PDF")}</button>
+              <button className="ghost-btn" onClick={() => void handleOpenAddPdfModal()} disabled={!pdfDoc || !pdfBytes || isBusy}>
+                {tr("PDF 추가", "Add PDF")}
               </button>
-            ) : null}
+              <button className="ghost-btn" onClick={() => void handleMergePdfs()} disabled={isBusy}>
+                {tr("PDF 병합", "Merge PDFs")}
+              </button>
+              {pdfDoc ? (
+                <button className="ghost-btn" onClick={() => void handleClosePdf()} disabled={isBusy}>
+                  {tr("닫기", "Close")}
+                </button>
+              ) : null}
+            </div>
+            <span>{statusText}</span>
+            <span>{tr("선택", "Selected")} {selectedPageNumbers.length} / {tr("전체", "Total")} {pageCount}</span>
+          </div>
+          <div className="toolbar-head-actions">
+            <button
+              className="ghost-btn toolbar-toggle-btn"
+              type="button"
+              onClick={() => setIsToolbarCollapsed((prev) => !prev)}
+              title={isToolbarCollapsed ? tr("툴바 펼치기", "Expand toolbar") : tr("툴바 접기", "Collapse toolbar")}
+            >
+              {isToolbarCollapsed ? tr("툴바 열기", "Show Toolbar") : tr("툴바 접기", "Hide Toolbar")}
+            </button>
             <label className="locale-control">
               <span>{tr("언어", "Language")}</span>
               <select value={locale} onChange={(event) => setLocale(event.currentTarget.value as Locale)}>
@@ -1611,8 +1646,37 @@ function App() {
                 <option value="en">{tr("영어", "English")}</option>
               </select>
             </label>
+            <div
+              className={`help-wrap ${showHelpInfo ? "open" : ""}`}
+              onMouseEnter={() => setShowHelpInfo(true)}
+              onMouseLeave={() => setShowHelpInfo(false)}
+            >
+              <button
+                className="help-btn"
+                type="button"
+                onClick={() => setShowHelpInfo((prev) => !prev)}
+                aria-label={tr("프로젝트 정보", "Project info")}
+                title={tr("프로젝트 정보", "Project info")}
+              >
+                ?
+              </button>
+              <div className="help-popover">
+                <strong>{tr("프로젝트 정보", "Project Info")}</strong>
+                <p>{tr("로컬 고성능 PDF 선택/병합/회전/저장 도구", "Local high-performance PDF split/merge/rotate/save tool")}</p>
+                <p>{tr("버전", "Version")}: v{APP_VERSION}</p>
+                <p className="help-link-row">
+                  <span>Git:</span>
+                  <button type="button" className="help-link-btn" onClick={() => void openProjectRepo()}>
+                    {PROJECT_REPO_URL}
+                  </button>
+                </p>
+              </div>
+            </div>
           </div>
+        </div>
 
+        {!isToolbarCollapsed ? (
+        <div className="panel toolbar-row">
           <div className="action-group toolbar-block select-block">
             <label className="inline-field quick-select-field">
               <span>{tr("빠른 선택", "Quick select")}</span>
@@ -1638,6 +1702,28 @@ function App() {
             </label>
             <button className="ghost-btn" onClick={() => void applyRangeSelection("add")} disabled={!pdfDoc || isBusy}>{tr("범위 추가", "Add range")}</button>
             <button className="ghost-btn" onClick={() => void applyRangeSelection("remove")} disabled={!pdfDoc || isBusy}>{tr("범위 제외", "Remove range")}</button>
+          </div>
+
+          <div className="action-group toolbar-block save-block">
+            <label className="inline-field"><span>{tr("저장 형식", "Save type")}</span>
+              <select value={saveType} onChange={(event) => setSaveType(event.currentTarget.value as SaveType)} disabled={!pdfDoc || isBusy}>
+                <option value="pdf">PDF</option>
+                <option value="png">PNG</option>
+                <option value="jpg">JPG</option>
+              </select>
+            </label>
+            <label className="inline-field">
+              <span>{tr("저장후탐색기", "After save explorer")}</span>
+              <select
+                value={openExplorerAfterSave ? "open" : "no-open"}
+                onChange={(event) => setOpenExplorerAfterSave(event.currentTarget.value === "open")}
+                disabled={isBusy}
+              >
+                <option value="open">{tr("열기", "Open")}</option>
+                <option value="no-open">{tr("안열기", "Do not open")}</option>
+              </select>
+            </label>
+            <button className="primary-btn" onClick={() => void handleSaveSelection()} disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}>{tr("선택 저장", "Save selection")}</button>
           </div>
 
           <div className="action-group toolbar-block view-block">
@@ -1695,60 +1781,8 @@ function App() {
             </button>
           </div>
 
-          <div className="action-group toolbar-block save-block">
-            <label className="inline-field"><span>{tr("저장 형식", "Save type")}</span>
-              <select value={saveType} onChange={(event) => setSaveType(event.currentTarget.value as SaveType)} disabled={!pdfDoc || isBusy}>
-                <option value="pdf">PDF</option>
-                <option value="png">PNG</option>
-                <option value="jpg">JPG</option>
-              </select>
-            </label>
-            <label className="inline-field">
-              <span>{tr("저장후탐색기", "After save explorer")}</span>
-              <select
-                value={openExplorerAfterSave ? "open" : "no-open"}
-                onChange={(event) => setOpenExplorerAfterSave(event.currentTarget.value === "open")}
-                disabled={isBusy}
-              >
-                <option value="open">{tr("열기", "Open")}</option>
-                <option value="no-open">{tr("안열기", "Do not open")}</option>
-              </select>
-            </label>
-            <button className="primary-btn" onClick={() => void handleSaveSelection()} disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}>{tr("선택 저장", "Save selection")}</button>
-          </div>
-
-          <div className="action-group toolbar-block status-inline">
-            <span>{statusText}</span>
-            <span>{tr("선택", "Selected")} {selectedPageNumbers.length} / {tr("전체", "Total")} {pageCount}</span>
-          </div>
-
-          <div
-            className={`help-wrap ${showHelpInfo ? "open" : ""}`}
-            onMouseEnter={() => setShowHelpInfo(true)}
-            onMouseLeave={() => setShowHelpInfo(false)}
-          >
-            <button
-              className="help-btn"
-              type="button"
-              onClick={() => setShowHelpInfo((prev) => !prev)}
-              aria-label={tr("프로젝트 정보", "Project info")}
-              title={tr("프로젝트 정보", "Project info")}
-            >
-              ?
-            </button>
-            <div className="help-popover">
-              <strong>{tr("프로젝트 정보", "Project Info")}</strong>
-              <p>{tr("로컬 고성능 PDF 선택/병합/회전/저장 도구", "Local high-performance PDF split/merge/rotate/save tool")}</p>
-              <p>{tr("버전", "Version")}: v{APP_VERSION}</p>
-              <p className="help-link-row">
-                <span>Git:</span>
-                <button type="button" className="help-link-btn" onClick={() => void openProjectRepo()}>
-                  {PROJECT_REPO_URL}
-                </button>
-              </p>
-            </div>
-          </div>
         </div>
+        ) : null}
       </section>
 
       {errorText ? <section className="panel error-banner">{errorText}</section> : null}

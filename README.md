@@ -4,6 +4,12 @@ Desktop app built with Tauri + React for fast local PDF split, reorder, rotate, 
 
 <img  alt="image" src="https://github.com/user-attachments/assets/214043cd-2b4a-4394-b6ef-111a3515e244" />
 
+## Latest Update (v0.1.3)
+
+- Improved toolbar UX: collapsible toolbar with localStorage persistence and refined control ordering/alignment.
+- Added PDF file-association flow support: opening a PDF from Explorer/Finder now loads directly in a new app window flow.
+- Updated Tauri runtime behavior to better support multi-window usage from external file-open entry paths.
+
 ## Features
 
 - Open a PDF and preview pages with virtualized thumbnails.
