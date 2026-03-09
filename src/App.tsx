@@ -3198,7 +3198,10 @@ function App() {
                   </button>
                   <button
                     className="ghost-btn micro-btn"
-                    onClick={addManualOutlineAtActivePage}
+                    onClick={() => {
+                      addManualOutlineAtActivePage();
+                      focusPreviewArea();
+                    }}
                     type="button"
                     disabled={isBusy}
                     title={tr("현재 페이지로 새 목차 항목을 추가합니다.", "Add a new outline entry for the current page.")}
@@ -3207,7 +3210,10 @@ function App() {
                   </button>
                   <button
                     className={`ghost-btn micro-btn ${isAreaSelectMode ? "tab-active" : ""}`}
-                    onClick={toggleAreaSelectionMode}
+                    onClick={() => {
+                      toggleAreaSelectionMode();
+                      focusPreviewArea();
+                    }}
                     type="button"
                     disabled={isBusy}
                     title={tr("영역 드래그로 텍스트 추출", "Drag area to extract text")}
@@ -3216,7 +3222,10 @@ function App() {
                   </button>
                   <button
                     className="ghost-btn micro-btn"
-                    onClick={() => void addSelectedPreviewTextToOutline()}
+                    onClick={() => {
+                      void addSelectedPreviewTextToOutline();
+                      focusPreviewArea();
+                    }}
                     type="button"
                     disabled={isBusy || normalizeOutlineTitle(selectedPreviewText).length === 0}
                     title={tr("선택 텍스트를 목차에 추가", "Add selected text to outline")}
