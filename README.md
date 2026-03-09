@@ -4,24 +4,29 @@ Desktop app built with Tauri + React for fast local PDF split, reorder, rotate, 
 
 <img  alt="image" src="https://github.com/user-attachments/assets/214043cd-2b4a-4394-b6ef-111a3515e244" />
 
-## Latest Update (v0.1.3)
+## Latest Update (v0.1.4)
 
-- Improved toolbar UX: collapsible toolbar with localStorage persistence and refined control ordering/alignment.
-- Added PDF file-association flow support: opening a PDF from Explorer/Finder now loads directly in a new app window flow.
-- Updated Tauri runtime behavior to better support multi-window usage from external file-open entry paths.
+- Added selection-based print flow using a generated temporary PDF, so multi-page printing and mixed portrait/landscape pages are handled reliably.
+- Improved keyboard workflow: preview area auto-focus on open, common shortcuts, and visible shortcut hints in the toolbar.
+- Changed initial open behavior to select all pages by default.
+- Improved desktop window restore behavior: the app now reopens using the last window size/state, including maximized state, and applies the same restore behavior to repeated/external open flows.
 
 ## Features
 
 - Open a PDF and preview pages with virtualized thumbnails.
 - Select pages by checkbox, quick input (`1,3,5-9`), and range add/remove controls.
+- Newly opened PDFs start with all pages selected.
 - Reorder pages by drag and drop in the thumbnail list.
 - Remove a page from selection using the trash action beside each thumbnail checkbox.
 - Rotate pages (left/right) before export.
 - Zoom preview (`-`, `+`, fit).
+- Print selected pages.
 - Add another PDF into the current document (front/back) with optional page range input (`1-3, 5, 9`).
 - Merge multiple PDFs with drag-and-drop merge order and insert position options (front/back/before current/after current).
 - Export selected pages as PDF (`<source>_<UUID>_selected.pdf`) or PNG/JPG (one file per selected page).
 - Optional "open explorer after save" behavior.
+- Toolbar buttons include icons and shortcut hints.
+- Keyboard shortcuts for open/add/merge/close/print/save/select/page navigation/rotate.
 - Korean/English UI language toggle.
 
 ## Tech Stack
@@ -96,6 +101,8 @@ Release script behavior:
 - Very large PDFs are handled with thumbnail virtualization and queue-based rendering.
 - Reordered thumbnail order is used when exporting selected pages.
 - Per-page rotation is applied to PDF and image export output.
+- Print output uses the selected page order and per-page rotation state.
+- The desktop window restores its last size and maximized state on next launch.
 
 ## Korean README
 
