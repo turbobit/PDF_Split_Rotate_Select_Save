@@ -487,7 +487,7 @@ export async function renderPageToBlob(
   canvas.height = Math.max(1, Math.floor(viewport.height));
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) throw new Error("Cannot acquire canvas context.");
-  const task = page.render({ canvas, canvasContext: context, viewport, intent: "print" });
+  const task = page.render({ canvasContext: context, viewport, intent: "print" });
   await task.promise;
   const blob = await canvasToBlob(canvas, mimeType, quality);
   canvas.width = 0;

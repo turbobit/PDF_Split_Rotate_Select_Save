@@ -1163,7 +1163,7 @@ function App() {
         if (!context) continue;
         context.setTransform(dpr, 0, 0, dpr, 0, 0);
         context.clearRect(0, 0, viewport.width, viewport.height);
-        const task = page.render({ canvas: cachedCanvas, canvasContext: context, viewport, intent: "display" });
+        const task = page.render({ canvasContext: context, viewport, intent: "display" });
         await task.promise;
         previewRenderCacheRef.current.set(key, cachedCanvas);
       } catch {
@@ -1227,7 +1227,7 @@ function App() {
           if (!context) throw new Error("Cannot acquire preview canvas context.");
           context.setTransform(dpr, 0, 0, dpr, 0, 0);
           context.clearRect(0, 0, viewport.width, viewport.height);
-          renderTask = page.render({ canvas, canvasContext: context, viewport, intent: "display" });
+          renderTask = page.render({ canvasContext: context, viewport, intent: "display" });
           await renderTask.promise;
           const cachedCanvas = document.createElement("canvas");
           cachedCanvas.width = canvas.width;
@@ -1250,7 +1250,7 @@ function App() {
             if (!secondaryContext) throw new Error("Cannot acquire preview canvas context.");
             secondaryContext.setTransform(dpr, 0, 0, dpr, 0, 0);
             secondaryContext.clearRect(0, 0, secondaryViewport.width, secondaryViewport.height);
-            secondaryRenderTask = secondaryPage.render({ canvas: secondaryCanvas, canvasContext: secondaryContext, viewport: secondaryViewport, intent: "display" });
+            secondaryRenderTask = secondaryPage.render({ canvasContext: secondaryContext, viewport: secondaryViewport, intent: "display" });
             await secondaryRenderTask.promise;
             const cachedCanvas = document.createElement("canvas");
             cachedCanvas.width = secondaryCanvas.width;
