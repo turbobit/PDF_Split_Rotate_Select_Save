@@ -65,6 +65,154 @@ import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
+type ToolbarIconName =
+  | "open"
+  | "add"
+  | "merge"
+  | "close"
+  | "print"
+  | "apply"
+  | "selectAll"
+  | "clear"
+  | "rangeAdd"
+  | "rangeRemove"
+  | "save";
+
+function ToolbarIcon({ name }: { name: ToolbarIconName }) {
+  const commonProps = {
+    className: "btn-icon",
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.4,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  switch (name) {
+    case "open":
+      return (
+        <svg {...commonProps}>
+          <path d="M2.5 5.5h3l1.2-2h2.7l1.2 2h3.1" />
+          <path d="M2 6.5h12l-1 6.5H3z" />
+        </svg>
+      );
+    case "add":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 4.5h7l3 3V13H3z" />
+          <path d="M10 4.5V8h3" />
+          <path d="M8 9v3" />
+          <path d="M6.5 10.5h3" />
+        </svg>
+      );
+    case "merge":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 4.5h3.5L8 6l1.5-1.5H13" />
+          <path d="M3 11.5h3.5L8 10l1.5 1.5H13" />
+          <path d="M8 6v4" />
+        </svg>
+      );
+    case "close":
+      return (
+        <svg {...commonProps}>
+          <path d="M3.5 3.5l9 9" />
+          <path d="M12.5 3.5l-9 9" />
+        </svg>
+      );
+    case "print":
+      return (
+        <svg {...commonProps}>
+          <path d="M4.5 6V3.5h7V6" />
+          <path d="M4 11.5H3a1.5 1.5 0 0 1-1.5-1.5V8A1.5 1.5 0 0 1 3 6.5h10A1.5 1.5 0 0 1 14.5 8v2A1.5 1.5 0 0 1 13 11.5h-1" />
+          <path d="M4.5 9.5h7V13h-7z" />
+        </svg>
+      );
+    case "apply":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 8l3 3 7-7" />
+        </svg>
+      );
+    case "selectAll":
+      return (
+        <svg {...commonProps}>
+          <path d="M2.5 3.5h4v4h-4z" />
+          <path d="M9.5 3.5h4v4h-4z" />
+          <path d="M2.5 10.5h4v2h-4z" />
+          <path d="M10 11.5l1.5 1.5 2.5-3" />
+        </svg>
+      );
+    case "clear":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 4.5h10" />
+          <path d="M5 4.5V3h6v1.5" />
+          <path d="M4.5 4.5l.8 8h5.4l.8-8" />
+          <path d="M6.5 6.5v4" />
+          <path d="M9.5 6.5v4" />
+        </svg>
+      );
+    case "rangeAdd":
+      return (
+        <svg {...commonProps}>
+          <path d="M2.5 5.5h5" />
+          <path d="M2.5 10.5h5" />
+          <path d="M11.5 5.5v5" />
+          <path d="M9 8h5" />
+        </svg>
+      );
+    case "rangeRemove":
+      return (
+        <svg {...commonProps}>
+          <path d="M2.5 5.5h5" />
+          <path d="M2.5 10.5h5" />
+          <path d="M9 8h5" />
+        </svg>
+      );
+    case "save":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 3.5h8l2 2V13H3z" />
+          <path d="M5 3.5v3h5v-3" />
+          <path d="M5 12v-3.5h6V12" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
+const SHORTCUT_LABELS = {
+  openPdf: "Ctrl+O",
+  addPdf: "Ctrl+Shift+O",
+  mergePdfs: "Ctrl+Shift+M",
+  closePdf: "Ctrl+W",
+  printSelection: "Ctrl+P",
+  saveSelection: "Ctrl+S",
+  applyQuickSelection: "Enter",
+  selectAllPages: "Ctrl+A",
+  clearSelection: "Esc",
+  addRange: "Ctrl+Shift+=",
+  removeRange: "Ctrl+-",
+  previousPage: "PageUp",
+  nextPage: "PageDown",
+  rotateLeft: "Ctrl+[",
+  rotateRight: "Ctrl+]",
+} as const;
+
+function withShortcutHint(label: string, shortcut?: string): string {
+  return shortcut ? `${label} (${shortcut})` : label;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
 function App() {
   const [locale, setLocale] = useState<Locale>(detectLocale);
   const tr = useCallback((ko: string, en: string) => (locale === "ko" ? ko : en), [locale]);
@@ -282,6 +430,14 @@ function App() {
     observer.observe(previewHost);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (!pdfDoc) return;
+    const frameId = window.requestAnimationFrame(() => {
+      previewInteractionRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [pdfDoc]);
 
   useEffect(() => {
     const viewport = thumbViewportRef.current;
@@ -1406,6 +1562,42 @@ function App() {
     return true;
   }, []);
 
+  const buildSelectedPdfBytes = useCallback(async (): Promise<Uint8Array> => {
+    if (!pdfBytes || selectedPageNumbers.length === 0) {
+      throw new Error(tr("인쇄 또는 저장할 페이지가 없습니다.", "No pages selected to print or save."));
+    }
+    let workingBytes = new Uint8Array(pdfBytes);
+    if (!hasPdfHeader(workingBytes) && pdfPath) {
+      const reloaded = new Uint8Array(await readFile(pdfPath));
+      if (hasPdfHeader(reloaded)) {
+        workingBytes = reloaded;
+        setPdfBytes(new Uint8Array(reloaded));
+      }
+    }
+    if (!hasPdfHeader(workingBytes)) {
+      throw new Error("Working PDF data is invalid. Please reopen the PDF and try again.");
+    }
+    const sourceDocument = await PDFDocument.load(workingBytes, { updateMetadata: false });
+    const outputDocument = await PDFDocument.create();
+    const sourceToOutputPage = new Map<number, number>();
+    for (const [targetIndex, sourcePageNumber] of selectedPageNumbers.entries()) {
+      const extraRotation = pageRotationsRef.current[sourcePageNumber] ?? 0;
+      await appendPageWithRotation(outputDocument, sourceDocument, sourcePageNumber - 1, extraRotation);
+      sourceToOutputPage.set(sourcePageNumber, targetIndex + 1);
+    }
+    const mappedOutlineEntries = validOutlineEntries
+      .filter((entry) => sourceToOutputPage.has(entry.pageNumber))
+      .map((entry) => ({
+        ...entry,
+        id: createOutlineEntryId(),
+        pageNumber: sourceToOutputPage.get(entry.pageNumber) ?? entry.pageNumber,
+      }));
+    if (mappedOutlineEntries.length > 0) {
+      applyOutlineEntriesToPdfDocument(outputDocument, mappedOutlineEntries);
+    }
+    return new Uint8Array(await outputDocument.save());
+  }, [pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
+
   const handleSavePdf = useCallback(async () => {
     if (!pdfBytes || selectedPageNumbers.length === 0) return;
     const sourceStem = normalizeFileStem(pdfPath ?? "document.pdf");
@@ -1419,36 +1611,7 @@ function App() {
     setIsSaving(true);
     setStatus({ type: "savingPdf" });
     try {
-      let workingBytes = new Uint8Array(pdfBytes);
-      if (!hasPdfHeader(workingBytes) && pdfPath) {
-        const reloaded = new Uint8Array(await readFile(pdfPath));
-        if (hasPdfHeader(reloaded)) {
-          workingBytes = reloaded;
-          setPdfBytes(new Uint8Array(reloaded));
-        }
-      }
-      if (!hasPdfHeader(workingBytes)) {
-        throw new Error("Working PDF data is invalid. Please reopen the PDF and try again.");
-      }
-      const sourceDocument = await PDFDocument.load(workingBytes, { updateMetadata: false });
-      const outputDocument = await PDFDocument.create();
-      const sourceToOutputPage = new Map<number, number>();
-      for (const [targetIndex, sourcePageNumber] of selectedPageNumbers.entries()) {
-        const extraRotation = pageRotationsRef.current[sourcePageNumber] ?? 0;
-        await appendPageWithRotation(outputDocument, sourceDocument, sourcePageNumber - 1, extraRotation);
-        sourceToOutputPage.set(sourcePageNumber, targetIndex + 1);
-      }
-      const mappedOutlineEntries = validOutlineEntries
-        .filter((entry) => sourceToOutputPage.has(entry.pageNumber))
-        .map((entry) => ({
-          ...entry,
-          id: createOutlineEntryId(),
-          pageNumber: sourceToOutputPage.get(entry.pageNumber) ?? entry.pageNumber,
-        }));
-      if (mappedOutlineEntries.length > 0) {
-        applyOutlineEntriesToPdfDocument(outputDocument, mappedOutlineEntries);
-      }
-      const outputBytes = await outputDocument.save();
+      const outputBytes = await buildSelectedPdfBytes();
       await writeFile(targetPath, outputBytes);
       if (openExplorerAfterSave) {
         try {
@@ -1470,7 +1633,97 @@ function App() {
     } finally {
       setIsSaving(false);
     }
-  }, [openExplorerAfterSave, pdfBytes, pdfPath, selectedPageNumbers, showToast, tr, validOutlineEntries]);
+  }, [buildSelectedPdfBytes, openExplorerAfterSave, pdfBytes, pdfPath, selectedPageNumbers.length, showToast, tr]);
+
+  const handlePrintSelection = useCallback(async () => {
+    if (!pdfDoc || !pdfBytes) {
+      await message(tr("먼저 PDF를 열어주세요.", "Open a PDF first."), { title: tr("안내", "Notice") });
+      return;
+    }
+    if (selectedPageNumbers.length === 0) {
+      await message(tr("인쇄할 페이지를 하나 이상 선택해주세요.", "Select at least one page to print."), {
+        title: tr("안내", "Notice"),
+      });
+      return;
+    }
+
+    setErrorText(null);
+    setIsSaving(true);
+    try {
+      const outputBytes = await buildSelectedPdfBytes();
+      const blob = new Blob([outputBytes], { type: "application/pdf" });
+      const blobUrl = URL.createObjectURL(blob);
+      const iframe = document.createElement("iframe");
+      iframe.style.position = "fixed";
+      iframe.style.right = "0";
+      iframe.style.bottom = "0";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      iframe.style.border = "0";
+
+      const printStarted = await new Promise<boolean>((resolve, reject) => {
+        let cleanedUp = false;
+        let printFallbackId: number | null = null;
+        let didStartPrint = false;
+        const cleanup = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          window.clearTimeout(timeoutId);
+          if (printFallbackId !== null) window.clearTimeout(printFallbackId);
+          iframe.remove();
+          URL.revokeObjectURL(blobUrl);
+        };
+        const finish = () => {
+          if (iframe.contentWindow) {
+            iframe.contentWindow.removeEventListener("afterprint", finish);
+          }
+          cleanup();
+          resolve(didStartPrint);
+        };
+        const timeoutId = window.setTimeout(() => {
+          cleanup();
+          resolve(didStartPrint);
+        }, 15000);
+
+        iframe.onload = () => {
+          const targetWindow = iframe.contentWindow;
+          if (!targetWindow) {
+            cleanup();
+            reject(new Error(tr("인쇄 창을 열지 못했습니다.", "Failed to open the print frame.")));
+            return;
+          }
+          targetWindow.addEventListener("afterprint", finish, { once: true });
+          window.setTimeout(() => {
+            try {
+              didStartPrint = true;
+              targetWindow.focus();
+              targetWindow.print();
+              printFallbackId = window.setTimeout(finish, 60000);
+            } catch (error) {
+              cleanup();
+              reject(error);
+            }
+          }, 250);
+        };
+
+        iframe.src = blobUrl;
+        document.body.appendChild(iframe);
+      });
+
+      if (printStarted) {
+        showToast(
+          tr(
+            `선택한 ${selectedPageNumbers.length}페이지 인쇄 창을 열었습니다.`,
+            `Opened the print dialog for ${selectedPageNumbers.length} selected pages.`,
+          ),
+        );
+      }
+    } catch (error) {
+      setErrorText(`${tr("인쇄 실패", "Print failed")}: ${formatError(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [buildSelectedPdfBytes, pdfBytes, pdfDoc, selectedPageNumbers.length, showToast, tr]);
 
   const handleSaveImages = useCallback(async (type: "png" | "jpg") => {
     if (!pdfDoc || selectedPageNumbers.length === 0) return;
@@ -1581,6 +1834,123 @@ function App() {
     }
   }, [pdfDoc, pdfBytes, selectedPageNumbers.length, saveType, handleSavePdf, handleSaveImages, tr, waitForOutlineLoadToFinish]);
 
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const ctrlOrMeta = event.ctrlKey || event.metaKey;
+      const shift = event.shiftKey;
+      const editable = isEditableTarget(event.target);
+      const key = event.key.toLowerCase();
+      if (isBusy) return;
+
+      if (ctrlOrMeta && !shift && key === "o") {
+        event.preventDefault();
+        void handleOpenPdf();
+        return;
+      }
+      if (ctrlOrMeta && shift && key === "o") {
+        if (editable) return;
+        event.preventDefault();
+        void handleOpenAddPdfModal();
+        return;
+      }
+      if (ctrlOrMeta && shift && key === "m") {
+        if (editable) return;
+        event.preventDefault();
+        void handleMergePdfs();
+        return;
+      }
+      if (ctrlOrMeta && !shift && key === "w") {
+        if (!pdfDoc) return;
+        event.preventDefault();
+        void handleClosePdf();
+        return;
+      }
+      if (ctrlOrMeta && !shift && key === "p") {
+        if (!pdfDoc || selectedPageNumbers.length === 0) return;
+        event.preventDefault();
+        void handlePrintSelection();
+        return;
+      }
+      if (ctrlOrMeta && !shift && key === "s") {
+        if (!pdfDoc || selectedPageNumbers.length === 0) return;
+        event.preventDefault();
+        void handleSaveSelection();
+        return;
+      }
+      if (!editable && ctrlOrMeta && !shift && key === "a") {
+        if (!pdfDoc || pageCount === 0) return;
+        event.preventDefault();
+        setSelectedPages(new Set(pageNumbers));
+        return;
+      }
+      if (!editable && event.key === "Escape") {
+        if (selectedPageNumbers.length === 0) return;
+        event.preventDefault();
+        setSelectedPages(new Set());
+        return;
+      }
+      if (!editable && ctrlOrMeta && shift && event.key === "+") {
+        if (!pdfDoc) return;
+        event.preventDefault();
+        void applyRangeSelection("add");
+        return;
+      }
+      if (!editable && ctrlOrMeta && shift && event.key === "=") {
+        if (!pdfDoc) return;
+        event.preventDefault();
+        void applyRangeSelection("add");
+        return;
+      }
+      if (!editable && ctrlOrMeta && !shift && key === "-") {
+        if (!pdfDoc) return;
+        event.preventDefault();
+        void applyRangeSelection("remove");
+        return;
+      }
+      if (!editable && event.key === "PageUp") {
+        if (!pdfDoc || pageCount === 0) return;
+        event.preventDefault();
+        movePage(-1);
+        return;
+      }
+      if (!editable && event.key === "PageDown") {
+        if (!pdfDoc || pageCount === 0) return;
+        event.preventDefault();
+        movePage(1);
+        return;
+      }
+      if (!editable && ctrlOrMeta && event.key === "[") {
+        if (!pdfDoc || pageCount === 0) return;
+        event.preventDefault();
+        rotateActivePage(-90);
+        return;
+      }
+      if (!editable && ctrlOrMeta && event.key === "]") {
+        if (!pdfDoc || pageCount === 0) return;
+        event.preventDefault();
+        rotateActivePage(90);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    applyRangeSelection,
+    handleClosePdf,
+    handleMergePdfs,
+    handleOpenAddPdfModal,
+    handleOpenPdf,
+    handlePrintSelection,
+    handleSaveSelection,
+    isBusy,
+    movePage,
+    pageCount,
+    pageNumbers,
+    pdfDoc,
+    rotateActivePage,
+    selectedPageNumbers.length,
+  ]);
+
   const openProjectRepo = useCallback(async () => {
     try {
       await openUrl(PROJECT_REPO_URL);
@@ -1614,16 +1984,54 @@ function App() {
         <div className="panel toolbar-head-row">
           <div className="toolbar-head-status">
             <div className="action-group head-file-actions">
-              <button className="primary-btn" onClick={() => void handleOpenPdf()} disabled={isBusy}>{tr("PDF 열기", "Open PDF")}</button>
-              <button className="ghost-btn" onClick={() => void handleOpenAddPdfModal()} disabled={!pdfDoc || !pdfBytes || isBusy}>
-                {tr("PDF 추가", "Add PDF")}
+              <button
+                className="primary-btn"
+                onClick={() => void handleOpenPdf()}
+                disabled={isBusy}
+                title={withShortcutHint(tr("PDF 열기", "Open PDF"), SHORTCUT_LABELS.openPdf)}
+              >
+                <span className="btn-content">
+                  <ToolbarIcon name="open" />
+                  {tr("PDF 열기", "Open PDF")}
+                  <span className="btn-shortcut">{SHORTCUT_LABELS.openPdf}</span>
+                </span>
               </button>
-              <button className="ghost-btn" onClick={() => void handleMergePdfs()} disabled={isBusy}>
-                {tr("PDF 병합", "Merge PDFs")}
+              <button
+                className="ghost-btn"
+                onClick={() => void handleOpenAddPdfModal()}
+                disabled={!pdfDoc || !pdfBytes || isBusy}
+                title={withShortcutHint(tr("PDF 추가", "Add PDF"), SHORTCUT_LABELS.addPdf)}
+              >
+                <span className="btn-content">
+                  <ToolbarIcon name="add" />
+                  {tr("PDF 추가", "Add PDF")}
+                  <span className="btn-shortcut">{SHORTCUT_LABELS.addPdf}</span>
+                </span>
+              </button>
+              <button
+                className="ghost-btn"
+                onClick={() => void handleMergePdfs()}
+                disabled={isBusy}
+                title={withShortcutHint(tr("PDF 병합", "Merge PDFs"), SHORTCUT_LABELS.mergePdfs)}
+              >
+                <span className="btn-content">
+                  <ToolbarIcon name="merge" />
+                  {tr("PDF 병합", "Merge PDFs")}
+                  <span className="btn-shortcut">{SHORTCUT_LABELS.mergePdfs}</span>
+                </span>
               </button>
               {pdfDoc ? (
-                <button className="ghost-btn" onClick={() => void handleClosePdf()} disabled={isBusy}>
-                  {tr("닫기", "Close")}
+                <button
+                  className="ghost-btn"
+                  onClick={() => void handleClosePdf()}
+                  disabled={isBusy}
+                  title={withShortcutHint(tr("닫기", "Close"), SHORTCUT_LABELS.closePdf)}
+                >
+                  <span className="btn-content">
+                    <ToolbarIcon name="close" />
+                    {tr("닫기", "Close")}
+                    <span className="btn-shortcut">{SHORTCUT_LABELS.closePdf}</span>
+                  </span>
                 </button>
               ) : null}
             </div>
@@ -1690,18 +2098,59 @@ function App() {
                 }}
               />
             </label>
-            <button className="ghost-btn" onClick={() => void applyQuickSelection()} disabled={!pdfDoc || isBusy}>
-              {tr("적용", "Apply")}
+            <button
+              className="ghost-btn"
+              onClick={() => void applyQuickSelection()}
+              disabled={!pdfDoc || isBusy}
+              title={withShortcutHint(tr("적용", "Apply"), SHORTCUT_LABELS.applyQuickSelection)}
+            >
+              <span className="btn-content"><ToolbarIcon name="apply" />{tr("적용", "Apply")}<span className="btn-shortcut">{SHORTCUT_LABELS.applyQuickSelection}</span></span>
             </button>
-            <button className="ghost-btn" onClick={() => setSelectedPages(new Set(pageNumbers))} disabled={!pdfDoc || isBusy || pageCount === 0}>{tr("전체 선택", "Select all")}</button>
-            <button className="ghost-btn" onClick={() => setSelectedPages(new Set())} disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}>{tr("선택 해제", "Clear selection")}</button>
+            <button
+              className="ghost-btn"
+              onClick={() => setSelectedPages(new Set(pageNumbers))}
+              disabled={!pdfDoc || isBusy || pageCount === 0}
+              title={withShortcutHint(tr("전체 선택", "Select all"), SHORTCUT_LABELS.selectAllPages)}
+            >
+              <span className="btn-content"><ToolbarIcon name="selectAll" />{tr("전체 선택", "Select all")}<span className="btn-shortcut">{SHORTCUT_LABELS.selectAllPages}</span></span>
+            </button>
+            <button
+              className="ghost-btn"
+              onClick={() => setSelectedPages(new Set())}
+              disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+              title={withShortcutHint(tr("선택 해제", "Clear selection"), SHORTCUT_LABELS.clearSelection)}
+            >
+              <span className="btn-content"><ToolbarIcon name="clear" />{tr("선택 해제", "Clear selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.clearSelection}</span></span>
+            </button>
+            <button
+              className="ghost-btn"
+              onClick={() => void handlePrintSelection()}
+              disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+              title={withShortcutHint(tr("선택 인쇄", "Print selection"), SHORTCUT_LABELS.printSelection)}
+            >
+              <span className="btn-content"><ToolbarIcon name="print" />{tr("선택 인쇄", "Print selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.printSelection}</span></span>
+            </button>
             <label className="inline-field range-field"><span>{tr("범위 선택", "Range select")}</span>
               <input value={rangeFromInput} onChange={(event) => setRangeFromInput(event.currentTarget.value)} placeholder={tr("시작", "Start")} inputMode="numeric" disabled={!pdfDoc || isBusy} />
               <span className="range-separator">~</span>
               <input value={rangeToInput} onChange={(event) => setRangeToInput(event.currentTarget.value)} placeholder={tr("끝", "End")} inputMode="numeric" disabled={!pdfDoc || isBusy} />
             </label>
-            <button className="ghost-btn" onClick={() => void applyRangeSelection("add")} disabled={!pdfDoc || isBusy}>{tr("범위 추가", "Add range")}</button>
-            <button className="ghost-btn" onClick={() => void applyRangeSelection("remove")} disabled={!pdfDoc || isBusy}>{tr("범위 제외", "Remove range")}</button>
+            <button
+              className="ghost-btn"
+              onClick={() => void applyRangeSelection("add")}
+              disabled={!pdfDoc || isBusy}
+              title={withShortcutHint(tr("범위 추가", "Add range"), SHORTCUT_LABELS.addRange)}
+            >
+              <span className="btn-content"><ToolbarIcon name="rangeAdd" />{tr("범위 추가", "Add range")}<span className="btn-shortcut">{SHORTCUT_LABELS.addRange}</span></span>
+            </button>
+            <button
+              className="ghost-btn"
+              onClick={() => void applyRangeSelection("remove")}
+              disabled={!pdfDoc || isBusy}
+              title={withShortcutHint(tr("범위 제외", "Remove range"), SHORTCUT_LABELS.removeRange)}
+            >
+              <span className="btn-content"><ToolbarIcon name="rangeRemove" />{tr("범위 제외", "Remove range")}<span className="btn-shortcut">{SHORTCUT_LABELS.removeRange}</span></span>
+            </button>
           </div>
 
           <div className="action-group toolbar-block save-block">
@@ -1723,17 +2172,24 @@ function App() {
                 <option value="no-open">{tr("안열기", "Do not open")}</option>
               </select>
             </label>
-            <button className="primary-btn" onClick={() => void handleSaveSelection()} disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}>{tr("선택 저장", "Save selection")}</button>
+            <button
+              className="primary-btn"
+              onClick={() => void handleSaveSelection()}
+              disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+              title={withShortcutHint(tr("선택 저장", "Save selection"), SHORTCUT_LABELS.saveSelection)}
+            >
+              <span className="btn-content"><ToolbarIcon name="save" />{tr("선택 저장", "Save selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.saveSelection}</span></span>
+            </button>
           </div>
           <div className="toolbar-line-break" aria-hidden="true" />
 
           <div className="action-group toolbar-block view-block">
-            <button className="ghost-btn" onClick={() => movePage(-1)} disabled={!pdfDoc || isBusy || activePage <= 1}>{tr("이전", "Previous")}</button>
+            <button className="ghost-btn" onClick={() => movePage(-1)} disabled={!pdfDoc || isBusy || activePage <= 1} title={withShortcutHint(tr("이전", "Previous"), SHORTCUT_LABELS.previousPage)}>{tr("이전", "Previous")}</button>
             <label className="inline-field page-field"><span>{tr("페이지", "Page")}</span>
               <input value={pageInput} onChange={(event) => setPageInput(event.currentTarget.value)} onBlur={goToPage} onKeyDown={(event) => { if (event.key === "Enter") goToPage(); }} inputMode="numeric" disabled={!pdfDoc || isBusy} />
             </label>
             <button className="ghost-btn" onClick={goToPage} disabled={!pdfDoc || isBusy}>{tr("이동", "Go")}</button>
-            <button className="ghost-btn" onClick={() => movePage(1)} disabled={!pdfDoc || isBusy || activePage >= pageCount}>{tr("다음", "Next")}</button>
+            <button className="ghost-btn" onClick={() => movePage(1)} disabled={!pdfDoc || isBusy || activePage >= pageCount} title={withShortcutHint(tr("다음", "Next"), SHORTCUT_LABELS.nextPage)}>{tr("다음", "Next")}</button>
           </div>
           <div className="action-group">
             <label className="inline-field zoom-field">
@@ -1769,6 +2225,7 @@ function App() {
               onClick={() => rotateActivePage(-90)}
               disabled={!pdfDoc || isBusy}
               type="button"
+              title={withShortcutHint(tr("왼쪽 회전", "Rotate Left"), SHORTCUT_LABELS.rotateLeft)}
             >
               {tr("왼쪽 회전", "Rotate Left")}
             </button>
@@ -1777,6 +2234,7 @@ function App() {
               onClick={() => rotateActivePage(90)}
               disabled={!pdfDoc || isBusy}
               type="button"
+              title={withShortcutHint(tr("오른쪽 회전", "Rotate Right"), SHORTCUT_LABELS.rotateRight)}
             >
               {tr("오른쪽 회전", "Rotate Right")}
             </button>

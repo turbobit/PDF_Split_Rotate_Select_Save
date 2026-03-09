@@ -252,6 +252,30 @@ input {
   border-color: var(--accent);
 }
 
+.btn-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.btn-shortcut {
+  margin-left: 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 button:disabled,
 select:disabled,
 input:disabled {
