@@ -770,6 +770,14 @@ input:disabled {
 
 .preview-page-stack {
   position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.preview-page-slot {
+  position: relative;
   flex-shrink: 0;
 }
 
@@ -780,7 +788,7 @@ input:disabled {
   box-shadow: 0 18px 26px rgba(32, 24, 17, 0.18);
 }
 
-.preview-page-stack canvas {
+.preview-page-slot canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -876,6 +884,11 @@ input:disabled {
 
 .merge-pdf-modal {
   width: min(560px, 96vw);
+}
+
+.pdf-info-modal {
+  width: min(720px, 96vw);
+  max-height: min(76vh, 900px);
 }
 
 .add-pdf-modal h2 {
@@ -998,6 +1011,45 @@ input:disabled {
   font-size: 12px;
   color: var(--ink);
   word-break: break-all;
+}
+
+.pdf-info-tab-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pdf-info-list,
+.pdf-font-list {
+  min-height: 220px;
+  max-height: 46vh;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.pdf-info-item,
+.pdf-font-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.pdf-info-item {
+  display: grid;
+  gap: 4px;
+}
+
+.pdf-info-item strong {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.pdf-font-item {
+  font-family: "Consolas", "Courier New", monospace;
 }
 
 @keyframes pulse {

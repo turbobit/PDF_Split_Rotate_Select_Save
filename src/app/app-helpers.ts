@@ -1,13 +1,13 @@
 import { PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, type PDFRef, degrees } from "pdf-lib";
 import { type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist";
 
-export const THUMBNAIL_SCALE = 0.22;
+export const THUMBNAIL_SCALE = 0.18;
 export const IMAGE_EXPORT_SCALE = 2;
 export const THUMB_ITEM_HEIGHT = 206;
 export const THUMB_OVERSCAN = 10;
-export const THUMB_PREFETCH = 14;
-export const THUMBNAIL_CONCURRENCY = 3;
-export const THUMB_CACHE_LIMIT = 420;
+export const THUMB_PREFETCH = 6;
+export const THUMBNAIL_CONCURRENCY = 2;
+export const THUMB_CACHE_LIMIT = 280;
 export const OUTLINE_MAX_DEPTH = 4;
 export const OUTLINE_TEXT_CANDIDATE_LIMIT = 80;
 export const OUTLINE_LOAD_TIMEOUT_MS = 4500;

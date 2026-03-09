@@ -15,6 +15,7 @@ import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AddPdfModal from "./components/AddPdfModal";
 import MergePdfModal from "./components/MergePdfModal";
+import PdfInfoModal, { type PdfInfoField } from "./components/PdfInfoModal";
 import {
   APP_VERSION,
   IMAGE_EXPORT_SCALE,
@@ -76,7 +77,9 @@ type ToolbarIconName =
   | "clear"
   | "rangeAdd"
   | "rangeRemove"
-  | "save";
+  | "save"
+  | "singlePage"
+  | "doublePage";
 
 function ToolbarIcon({ name }: { name: ToolbarIconName }) {
   const commonProps = {
@@ -180,6 +183,21 @@ function ToolbarIcon({ name }: { name: ToolbarIconName }) {
           <path d="M5 12v-3.5h6V12" />
         </svg>
       );
+    case "singlePage":
+      return (
+        <svg {...commonProps}>
+          <rect x="4" y="2.5" width="8" height="11" rx="1.2" />
+          <path d="M6 5h4" />
+          <path d="M6 7.5h4" />
+        </svg>
+      );
+    case "doublePage":
+      return (
+        <svg {...commonProps}>
+          <rect x="1.8" y="3" width="5.5" height="10" rx="0.9" />
+          <rect x="8.7" y="3" width="5.5" height="10" rx="0.9" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -213,6 +231,12 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+function readStoredZoom(): number {
+  const raw = window.localStorage.getItem("app.previewZoom");
+  const parsed = raw ? Number.parseInt(raw, 10) : 100;
+  return clamp(Number.isFinite(parsed) ? parsed : 100, ZOOM_MIN, ZOOM_MAX);
+}
+
 function App() {
   const [locale, setLocale] = useState<Locale>(detectLocale);
   const tr = useCallback((ko: string, en: string) => (locale === "ko" ? ko : en), [locale]);
@@ -227,6 +251,7 @@ function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("thumbnails");
   const [outlinePanelMode, setOutlinePanelMode] = useState<OutlinePanelMode>("view");
   const [outlineEntries, setOutlineEntries] = useState<OutlineEntry[]>([]);
+  const [hasLoadedOutlineOnce, setHasLoadedOutlineOnce] = useState(false);
   const [isLoadingOutline, setIsLoadingOutline] = useState(false);
   const [isGeneratingOutline, setIsGeneratingOutline] = useState(false);
   const [saveType, setSaveType] = useState<SaveType>("pdf");
@@ -252,6 +277,11 @@ function App() {
   const [errorText, setErrorText] = useState<string | null>(null);
   const [toastText, setToastText] = useState<string | null>(null);
   const [showHelpInfo, setShowHelpInfo] = useState(false);
+  const [showPdfInfoModal, setShowPdfInfoModal] = useState(false);
+  const [pdfInfoTab, setPdfInfoTab] = useState<"metadata" | "fonts">("metadata");
+  const [isLoadingPdfInfo, setIsLoadingPdfInfo] = useState(false);
+  const [pdfInfoMetadataFields, setPdfInfoMetadataFields] = useState<PdfInfoField[]>([]);
+  const [pdfInfoFontNames, setPdfInfoFontNames] = useState<string[]>([]);
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState<boolean>(() => window.localStorage.getItem("app.toolbarCollapsed") === "1");
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -261,12 +291,15 @@ function App() {
   const [thumbViewportHeight, setThumbViewportHeight] = useState(0);
   const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 });
   const [previewPageSize, setPreviewPageSize] = useState({ width: 0, height: 0 });
+  const [previewSecondaryPageSize, setPreviewSecondaryPageSize] = useState({ width: 0, height: 0 });
   const [previewTextSpans, setPreviewTextSpans] = useState<PreviewTextSpan[]>([]);
   const [selectedPreviewText, setSelectedPreviewText] = useState("");
   const [isAreaSelectMode, setIsAreaSelectMode] = useState(false);
   const [isAreaSelecting, setIsAreaSelecting] = useState(false);
   const [previewSelectionRect, setPreviewSelectionRect] = useState<PreviewSelectionRect | null>(null);
-  const [previewZoom, setPreviewZoom] = useState(100);
+  const [previewZoom, setPreviewZoom] = useState(readStoredZoom);
+  const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "manual">(() => (window.localStorage.getItem("app.previewZoomMode") === "manual" ? "manual" : "fit"));
+  const [previewSpreadMode, setPreviewSpreadMode] = useState<boolean>(() => window.localStorage.getItem("app.previewSpreadMode") === "1");
   const [pageRotations, setPageRotations] = useState<Record<number, number>>({});
   const [isPreviewFocused, setIsPreviewFocused] = useState(false);
   const [draggingPage, setDraggingPage] = useState<number | null>(null);
@@ -281,6 +314,7 @@ function App() {
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const previewInteractionRef = useRef<HTMLDivElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewCanvasSecondaryRef = useRef<HTMLCanvasElement | null>(null);
   const previewTextLayerRef = useRef<HTMLDivElement | null>(null);
   const thumbViewportRef = useRef<HTMLDivElement | null>(null);
   const outlineListRef = useRef<HTMLDivElement | null>(null);
@@ -353,6 +387,18 @@ function App() {
   }, [isToolbarCollapsed]);
 
   useEffect(() => {
+    window.localStorage.setItem("app.previewZoom", String(previewZoom));
+  }, [previewZoom]);
+
+  useEffect(() => {
+    window.localStorage.setItem("app.previewZoomMode", previewZoomMode);
+  }, [previewZoomMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem("app.previewSpreadMode", previewSpreadMode ? "1" : "0");
+  }, [previewSpreadMode]);
+
+  useEffect(() => {
     pageRotationsRef.current = pageRotations;
   }, [pageRotations]);
 
@@ -388,6 +434,13 @@ function App() {
     previewSelectionRectRef.current = previewSelectionRect;
   }, [previewSelectionRect]);
 
+  useEffect(() => {
+    if (!previewSpreadMode) return;
+    setIsAreaSelectMode(false);
+    setIsAreaSelecting(false);
+    setPreviewSelectionRect(null);
+  }, [previewSpreadMode]);
+
   const clearThumbnailPipeline = useCallback(() => {
     for (const url of Object.values(thumbnailUrlsRef.current)) URL.revokeObjectURL(url);
     thumbnailUrlsRef.current = {};
@@ -403,12 +456,21 @@ function App() {
 
   const clearPreviewCanvas = useCallback(() => {
     const canvas = previewCanvasRef.current;
-    if (!canvas) return;
-    canvas.width = 0;
-    canvas.height = 0;
-    canvas.style.width = "0px";
-    canvas.style.height = "0px";
+    const secondaryCanvas = previewCanvasSecondaryRef.current;
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.style.width = "0px";
+      canvas.style.height = "0px";
+    }
+    if (secondaryCanvas) {
+      secondaryCanvas.width = 0;
+      secondaryCanvas.height = 0;
+      secondaryCanvas.style.width = "0px";
+      secondaryCanvas.style.height = "0px";
+    }
     setPreviewPageSize({ width: 0, height: 0 });
+    setPreviewSecondaryPageSize({ width: 0, height: 0 });
     setPreviewTextSpans([]);
     setSelectedPreviewText("");
     setPreviewSelectionRect(null);
@@ -473,18 +535,23 @@ function App() {
   useEffect(() => {
     if (!pdfDoc) {
       setOutlineEntries([]);
+      setHasLoadedOutlineOnce(false);
       setIsLoadingOutline(false);
       setIsGeneratingOutline(false);
       setSidebarTab("thumbnails");
       setOutlinePanelMode("view");
       return;
     }
+    if (sidebarTab !== "outline" || hasLoadedOutlineOnce) return;
     let cancelled = false;
     setIsLoadingOutline(true);
     void (async () => {
       try {
         const entries = await readOutlineEntriesFromDocument(pdfDoc);
-        if (!cancelled) setOutlineEntries(entries);
+        if (!cancelled) {
+          setOutlineEntries(entries);
+          setHasLoadedOutlineOnce(true);
+        }
       } catch (error) {
         if (!cancelled) setErrorText(`${tr("목차 로딩 실패", "Failed to load outline")}: ${formatError(error)}`);
       } finally {
@@ -494,7 +561,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [pdfDoc, readOutlineEntriesFromDocument, tr]);
+  }, [hasLoadedOutlineOnce, pdfDoc, readOutlineEntriesFromDocument, sidebarTab, tr]);
 
   const reloadOutlineFromPdf = useCallback(async () => {
     if (!pdfDoc || isBusy) return;
@@ -503,6 +570,7 @@ function App() {
     try {
       const entries = await readOutlineEntriesFromDocument(pdfDoc);
       setOutlineEntries(entries);
+      setHasLoadedOutlineOnce(true);
       setSidebarTab("outline");
       setOutlinePanelMode("view");
       showToast(
@@ -870,20 +938,34 @@ function App() {
   useEffect(() => {
     if (!pdfDoc || previewSize.width < 40 || previewSize.height < 40) return;
     const canvas = previewCanvasRef.current;
+    const secondaryCanvas = previewCanvasSecondaryRef.current;
     if (!canvas) return;
     let renderTask: RenderTask | null = null;
+    let secondaryRenderTask: RenderTask | null = null;
+    let textLayerTimer: number | null = null;
     let cancelled = false;
     const run = async () => {
       try {
         const page = await pdfDoc.getPage(activePage);
         if (cancelled) return;
+        const secondaryPageNumber = previewSpreadMode && activePage < pageCount ? activePage + 1 : null;
+        const secondaryPage = secondaryPageNumber ? await pdfDoc.getPage(secondaryPageNumber) : null;
+        if (cancelled) return;
         const rotation = pageRotationsRef.current[activePage] ?? 0;
+        const secondaryRotation = secondaryPageNumber ? (pageRotationsRef.current[secondaryPageNumber] ?? 0) : 0;
         const base = page.getViewport({ scale: 1, rotation });
+        const secondaryBase = secondaryPage ? secondaryPage.getViewport({ scale: 1, rotation: secondaryRotation }) : null;
+        const spreadGap = secondaryBase ? 12 : 0;
         const fitW = Math.max(previewSize.width - 24, 140);
         const fitH = Math.max(previewSize.height - 64, 140);
-        const fitScale = Math.max(0.1, Math.min(fitW / base.width, fitH / base.height));
-        const cssScale = Math.max(0.1, fitScale * (previewZoom / 100));
+        const targetWidth = secondaryBase ? base.width + spreadGap + secondaryBase.width : base.width;
+        const targetHeight = secondaryBase ? Math.max(base.height, secondaryBase.height) : base.height;
+        const fitScale = Math.max(0.1, Math.min(fitW / targetWidth, fitH / targetHeight));
+        const cssScale = previewZoomMode === "fit"
+          ? fitScale
+          : Math.max(0.1, fitScale * (previewZoom / 100));
         const viewport = page.getViewport({ scale: cssScale, rotation });
+        const secondaryViewport = secondaryPage ? secondaryPage.getViewport({ scale: cssScale, rotation: secondaryRotation }) : null;
         const dpr = window.devicePixelRatio || 1;
         canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
         canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
@@ -895,15 +977,50 @@ function App() {
         context.clearRect(0, 0, viewport.width, viewport.height);
         renderTask = page.render({ canvas, canvasContext: context, viewport, intent: "display" });
         await renderTask.promise;
-        const textContent = await page.getTextContent();
-        if (cancelled) return;
+        if (secondaryCanvas && secondaryViewport && secondaryPage) {
+          secondaryCanvas.width = Math.max(1, Math.floor(secondaryViewport.width * dpr));
+          secondaryCanvas.height = Math.max(1, Math.floor(secondaryViewport.height * dpr));
+          secondaryCanvas.style.width = `${Math.floor(secondaryViewport.width)}px`;
+          secondaryCanvas.style.height = `${Math.floor(secondaryViewport.height)}px`;
+          const secondaryContext = secondaryCanvas.getContext("2d", { alpha: false });
+          if (!secondaryContext) throw new Error("Cannot acquire preview canvas context.");
+          secondaryContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+          secondaryContext.clearRect(0, 0, secondaryViewport.width, secondaryViewport.height);
+          secondaryRenderTask = secondaryPage.render({ canvas: secondaryCanvas, canvasContext: secondaryContext, viewport: secondaryViewport, intent: "display" });
+          await secondaryRenderTask.promise;
+        } else if (secondaryCanvas) {
+          secondaryCanvas.width = 0;
+          secondaryCanvas.height = 0;
+          secondaryCanvas.style.width = "0px";
+          secondaryCanvas.style.height = "0px";
+        }
         setPreviewPageSize({
           width: Math.max(1, Math.floor(viewport.width)),
           height: Math.max(1, Math.floor(viewport.height)),
         });
-        setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale));
+        setPreviewSecondaryPageSize(
+          secondaryViewport
+            ? {
+              width: Math.max(1, Math.floor(secondaryViewport.width)),
+              height: Math.max(1, Math.floor(secondaryViewport.height)),
+            }
+            : { width: 0, height: 0 },
+        );
+        setPreviewTextSpans([]);
         setSelectedPreviewText("");
         setPreviewSelectionRect(null);
+        textLayerTimer = window.setTimeout(async () => {
+          try {
+            const textContent = await page.getTextContent();
+            if (cancelled) return;
+            setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale));
+          } catch (error) {
+            const known = error as { name?: string };
+            if (known.name !== "RenderingCancelledException" && !cancelled) {
+              setErrorText(`${tr("본문 텍스트 레이어 로딩 실패", "Failed to load text layer")}: ${formatError(error)}`);
+            }
+          }
+        }, 120);
       } catch (error) {
         const known = error as { name?: string };
         if (known.name !== "RenderingCancelledException" && !cancelled) {
@@ -914,9 +1031,11 @@ function App() {
     void run();
     return () => {
       cancelled = true;
+      if (textLayerTimer !== null) window.clearTimeout(textLayerTimer);
       if (renderTask) renderTask.cancel();
+      if (secondaryRenderTask) secondaryRenderTask.cancel();
     };
-  }, [pdfDoc, activePage, pageRotations, previewSize, previewZoom, tr]);
+  }, [pdfDoc, activePage, pageCount, pageRotations, previewSize, previewSpreadMode, previewZoom, previewZoomMode, tr]);
 
   const resetPdfWorkspace = useCallback(async () => {
     clearOutlineDragState();
@@ -933,12 +1052,16 @@ function App() {
     setSidebarTab("thumbnails");
     setOutlinePanelMode("view");
     setOutlineEntries([]);
+    setHasLoadedOutlineOnce(false);
     setIsLoadingOutline(false);
     setIsGeneratingOutline(false);
+    setShowPdfInfoModal(false);
+    setPdfInfoTab("metadata");
+    setPdfInfoMetadataFields([]);
+    setPdfInfoFontNames([]);
     setQuickSelectInput("");
     setRangeFromInput("");
     setRangeToInput("");
-    setPreviewZoom(100);
     setIsAreaSelectMode(false);
     setPageRotations({});
     pageRotationsRef.current = {};
@@ -950,13 +1073,11 @@ function App() {
     try {
       await resetPdfWorkspace();
       const fileBytes = new Uint8Array(await readFile(path));
-      const previewBytes = cloneBytes(fileBytes);
-      const stateBytes = cloneBytes(fileBytes);
-      const task = getDocument({ data: previewBytes });
+      const task = getDocument({ data: fileBytes });
       const loadedDoc = await task.promise;
       await replacePdfDocument(loadedDoc);
       setPdfPath(path);
-      setPdfBytes(stateBytes);
+      setPdfBytes(fileBytes);
       setPageCount(loadedDoc.numPages);
       setPageOrder(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1));
       setActivePage(1);
@@ -964,9 +1085,10 @@ function App() {
       setSelectedPages(new Set(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1)));
       setSidebarTab("thumbnails");
       setOutlinePanelMode("view");
+      setOutlineEntries([]);
+      setHasLoadedOutlineOnce(false);
       setRangeFromInput("");
       setRangeToInput("");
-      setPreviewZoom(100);
       setIsAreaSelectMode(false);
       setPageRotations({});
       pageRotationsRef.current = {};
@@ -1458,10 +1580,12 @@ function App() {
   }, [pageCount, quickSelectInput, tr]);
 
   const adjustZoom = useCallback((delta: number) => {
+    setPreviewZoomMode("manual");
     setPreviewZoom((previous) => clamp(previous + delta, ZOOM_MIN, ZOOM_MAX));
   }, []);
 
   const resetZoom = useCallback(() => {
+    setPreviewZoomMode("fit");
     setPreviewZoom(100);
   }, []);
 
@@ -1471,6 +1595,7 @@ function App() {
       if (event.ctrlKey) {
         event.preventDefault();
         const delta = event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+        setPreviewZoomMode("manual");
         setPreviewZoom((previous) => clamp(previous + delta, ZOOM_MIN, ZOOM_MAX));
         return;
       }
@@ -1951,6 +2076,58 @@ function App() {
     selectedPageNumbers.length,
   ]);
 
+  const loadPdfInfo = useCallback(async () => {
+    if (!pdfDoc) return;
+    setIsLoadingPdfInfo(true);
+    try {
+      const metadata = await pdfDoc.getMetadata();
+      const info = (metadata.info ?? {}) as Record<string, unknown>;
+      const rawFields: Array<[string, unknown]> = [
+        [tr("파일", "File"), pdfPath ?? "-"],
+        [tr("페이지 수", "Pages"), pdfDoc.numPages],
+        [tr("제목", "Title"), info.Title],
+        [tr("저자", "Author"), info.Author],
+        [tr("주제", "Subject"), info.Subject],
+        [tr("키워드", "Keywords"), info.Keywords],
+        [tr("작성 도구", "Creator"), info.Creator],
+        [tr("생성 프로그램", "Producer"), info.Producer],
+        [tr("생성일", "Creation Date"), info.CreationDate],
+        [tr("수정일", "Modification Date"), info.ModDate],
+        [tr("PDF 버전", "PDF Format Version"), info.PDFFormatVersion],
+      ];
+      setPdfInfoMetadataFields(
+        rawFields
+          .filter(([, value]) => value !== undefined && value !== null && String(value).trim().length > 0)
+          .map(([label, value]) => ({ label, value: String(value) })),
+      );
+
+      const fonts = new Set<string>();
+      for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+        const page = await pdfDoc.getPage(pageNumber);
+        const textContent = await page.getTextContent();
+        const styles = textContent.styles as Record<string, { fontFamily?: string }>;
+        for (const item of textContent.items as Array<{ fontName?: string }>) {
+          const fontName = item.fontName;
+          const fontFamily = fontName ? styles[fontName]?.fontFamily : undefined;
+          const displayName = normalizeOutlineTitle(fontFamily ?? fontName ?? "");
+          if (displayName.length > 0) fonts.add(displayName);
+        }
+      }
+      setPdfInfoFontNames(Array.from(fonts).sort((a, b) => a.localeCompare(b)));
+    } catch (error) {
+      setErrorText(`${tr("PDF 정보 로딩 실패", "Failed to load PDF info")}: ${formatError(error)}`);
+    } finally {
+      setIsLoadingPdfInfo(false);
+    }
+  }, [pdfDoc, pdfPath, tr]);
+
+  const openPdfInfoModal = useCallback(() => {
+    if (!pdfDoc || isBusy) return;
+    setPdfInfoTab("metadata");
+    setShowPdfInfoModal(true);
+    void loadPdfInfo();
+  }, [isBusy, loadPdfInfo, pdfDoc]);
+
   const openProjectRepo = useCallback(async () => {
     try {
       await openUrl(PROJECT_REPO_URL);
@@ -1964,6 +2141,10 @@ function App() {
     () => (previewSelectionRect ? normalizeSelectionRect(previewSelectionRect) : null),
     [previewSelectionRect],
   );
+  const previewStackStyle = useMemo(() => ({
+    width: `${previewPageSize.width + (previewSecondaryPageSize.width > 0 ? previewSecondaryPageSize.width + 12 : 0)}px`,
+    height: `${Math.max(previewPageSize.height, previewSecondaryPageSize.height)}px`,
+  }), [previewPageSize.height, previewPageSize.width, previewSecondaryPageSize.height, previewSecondaryPageSize.width]);
   const addPdfLabel = useMemo(() => (addPdfPath ? normalizeFileStem(addPdfPath) : "-"), [addPdfPath]);
   const hasCurrentPdf = pdfDoc !== null;
   const handleMergeDragStart = useCallback((path: string, index: number) => {
@@ -2021,18 +2202,28 @@ function App() {
                 </span>
               </button>
               {pdfDoc ? (
-                <button
-                  className="ghost-btn"
-                  onClick={() => void handleClosePdf()}
-                  disabled={isBusy}
-                  title={withShortcutHint(tr("닫기", "Close"), SHORTCUT_LABELS.closePdf)}
-                >
-                  <span className="btn-content">
-                    <ToolbarIcon name="close" />
-                    {tr("닫기", "Close")}
-                    <span className="btn-shortcut">{SHORTCUT_LABELS.closePdf}</span>
-                  </span>
-                </button>
+                <>
+                  <button
+                    className="primary-btn"
+                    onClick={() => void handleSaveSelection()}
+                    disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+                    title={withShortcutHint(tr("선택 저장", "Save selection"), SHORTCUT_LABELS.saveSelection)}
+                  >
+                    <span className="btn-content"><ToolbarIcon name="save" />{tr("선택 저장", "Save selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.saveSelection}</span></span>
+                  </button>
+                  <button
+                    className="ghost-btn"
+                    onClick={() => void handleClosePdf()}
+                    disabled={isBusy}
+                    title={withShortcutHint(tr("닫기", "Close"), SHORTCUT_LABELS.closePdf)}
+                  >
+                    <span className="btn-content">
+                      <ToolbarIcon name="close" />
+                      {tr("닫기", "Close")}
+                      <span className="btn-shortcut">{SHORTCUT_LABELS.closePdf}</span>
+                    </span>
+                  </button>
+                </>
               ) : null}
             </div>
             <span>{statusText}</span>
@@ -2054,6 +2245,15 @@ function App() {
                 <option value="en">{tr("영어", "English")}</option>
               </select>
             </label>
+            <button
+              className="ghost-btn"
+              type="button"
+              onClick={openPdfInfoModal}
+              disabled={!pdfDoc || isBusy}
+              title={tr("문서 메타정보와 사용 폰트를 확인", "View document metadata and detected fonts")}
+            >
+              {tr("PDF정보", "PDF Info")}
+            </button>
             <div
               className={`help-wrap ${showHelpInfo ? "open" : ""}`}
               onMouseEnter={() => setShowHelpInfo(true)}
@@ -2172,14 +2372,6 @@ function App() {
                 <option value="no-open">{tr("안열기", "Do not open")}</option>
               </select>
             </label>
-            <button
-              className="primary-btn"
-              onClick={() => void handleSaveSelection()}
-              disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
-              title={withShortcutHint(tr("선택 저장", "Save selection"), SHORTCUT_LABELS.saveSelection)}
-            >
-              <span className="btn-content"><ToolbarIcon name="save" />{tr("선택 저장", "Save selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.saveSelection}</span></span>
-            </button>
           </div>
           <div className="toolbar-line-break" aria-hidden="true" />
 
@@ -2202,7 +2394,7 @@ function App() {
               >
                 -
               </button>
-              <span className="zoom-value">{previewZoom}%</span>
+              <span className="zoom-value">{previewZoomMode === "fit" ? tr("맞춤", "Fit") : `${previewZoom}%`}</span>
               <button
                 className="ghost-btn mini-btn"
                 onClick={() => adjustZoom(ZOOM_STEP)}
@@ -2218,6 +2410,24 @@ function App() {
                 type="button"
               >
                 {tr("맞춤", "Fit")}
+              </button>
+              <button
+                className={`ghost-btn mini-btn ${!previewSpreadMode ? "tab-active" : ""}`}
+                onClick={() => setPreviewSpreadMode(false)}
+                disabled={!pdfDoc || isBusy}
+                type="button"
+                title={tr("한 페이지씩 보기", "Show one page at a time")}
+              >
+                <span className="btn-content"><ToolbarIcon name="singlePage" />{tr("한페이지씩", "1-Up")}</span>
+              </button>
+              <button
+                className={`ghost-btn mini-btn ${previewSpreadMode ? "tab-active" : ""}`}
+                onClick={() => setPreviewSpreadMode(true)}
+                disabled={!pdfDoc || isBusy}
+                type="button"
+                title={tr("두 페이지씩 보기", "Show two pages at a time")}
+              >
+                <span className="btn-content"><ToolbarIcon name="doublePage" />{tr("두페이지씩", "2-Up")}</span>
               </button>
             </label>
             <button
@@ -2625,47 +2835,63 @@ function App() {
                   </span>
                 </div>
                 <div
-                  className="preview-page-stack"
-                  style={{
-                    width: `${previewPageSize.width}px`,
-                    height: `${previewPageSize.height}px`,
-                  }}
+                  className={`preview-page-stack ${previewSecondaryPageSize.width > 0 ? "spread" : ""}`}
+                  style={previewStackStyle}
                 >
-                  <canvas ref={previewCanvasRef} />
                   <div
-                    className={`preview-text-layer ${isAreaSelectMode ? "area-mode" : ""}`}
-                    ref={previewTextLayerRef}
-                    onMouseDown={handlePreviewTextLayerMouseDown}
+                    className="preview-page-slot"
+                    style={{
+                      width: `${previewPageSize.width}px`,
+                      height: `${previewPageSize.height}px`,
+                    }}
                   >
-                    {previewTextSpans.map((span) => (
-                      <span
-                        key={span.id}
-                        className="preview-text-span"
-                        data-text={span.text}
-                        style={{
-                          left: `${span.left}px`,
-                          top: `${span.top}px`,
-                          width: `${span.width}px`,
-                          height: `${span.height}px`,
-                          fontSize: `${span.fontSize}px`,
-                          transform: `rotate(${span.angleDeg}deg)`,
-                        }}
-                      >
-                        {span.text}
-                      </span>
-                    ))}
-                    {normalizedPreviewSelectionRect ? (
-                      <div
-                        className="preview-selection-rect"
-                        style={{
-                          left: `${normalizedPreviewSelectionRect.left}px`,
-                          top: `${normalizedPreviewSelectionRect.top}px`,
-                          width: `${Math.max(0, normalizedPreviewSelectionRect.right - normalizedPreviewSelectionRect.left)}px`,
-                          height: `${Math.max(0, normalizedPreviewSelectionRect.bottom - normalizedPreviewSelectionRect.top)}px`,
-                        }}
-                      />
-                    ) : null}
+                    <canvas ref={previewCanvasRef} />
+                    <div
+                      className={`preview-text-layer ${isAreaSelectMode ? "area-mode" : ""}`}
+                      ref={previewTextLayerRef}
+                      onMouseDown={handlePreviewTextLayerMouseDown}
+                    >
+                      {previewTextSpans.map((span) => (
+                        <span
+                          key={span.id}
+                          className="preview-text-span"
+                          data-text={span.text}
+                          style={{
+                            left: `${span.left}px`,
+                            top: `${span.top}px`,
+                            width: `${span.width}px`,
+                            height: `${span.height}px`,
+                            fontSize: `${span.fontSize}px`,
+                            transform: `rotate(${span.angleDeg}deg)`,
+                          }}
+                        >
+                          {span.text}
+                        </span>
+                      ))}
+                      {normalizedPreviewSelectionRect ? (
+                        <div
+                          className="preview-selection-rect"
+                          style={{
+                            left: `${normalizedPreviewSelectionRect.left}px`,
+                            top: `${normalizedPreviewSelectionRect.top}px`,
+                            width: `${Math.max(0, normalizedPreviewSelectionRect.right - normalizedPreviewSelectionRect.left)}px`,
+                            height: `${Math.max(0, normalizedPreviewSelectionRect.bottom - normalizedPreviewSelectionRect.top)}px`,
+                          }}
+                        />
+                      ) : null}
+                    </div>
                   </div>
+                  {previewSecondaryPageSize.width > 0 ? (
+                    <div
+                      className="preview-page-slot secondary"
+                      style={{
+                        width: `${previewSecondaryPageSize.width}px`,
+                        height: `${previewSecondaryPageSize.height}px`,
+                      }}
+                    >
+                      <canvas ref={previewCanvasSecondaryRef} />
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </>
@@ -2690,6 +2916,17 @@ function App() {
         onStartDrag={handleMergeDragStart}
         onClose={closeMergePdfModal}
         onApply={applyMergeModal}
+      />
+
+      <PdfInfoModal
+        isOpen={showPdfInfoModal}
+        tr={tr}
+        activeTab={pdfInfoTab}
+        onChangeTab={setPdfInfoTab}
+        onClose={() => setShowPdfInfoModal(false)}
+        isLoading={isLoadingPdfInfo}
+        metadataFields={pdfInfoMetadataFields}
+        fontNames={pdfInfoFontNames}
       />
 
       <AddPdfModal
