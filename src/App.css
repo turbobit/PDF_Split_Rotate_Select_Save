@@ -814,6 +814,8 @@ input:disabled {
 
 .preview-text-span {
   position: absolute;
+  box-sizing: content-box;
+  padding-right: 0.18em;
   transform-origin: left top;
   white-space: pre;
   line-height: 1;

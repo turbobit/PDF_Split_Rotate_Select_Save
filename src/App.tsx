@@ -525,8 +525,9 @@ function App() {
       setDebouncedSearchQuery("");
       return;
     }
+    const committedQuery = searchQuery;
     const timerId = window.setTimeout(() => {
-      setDebouncedSearchQuery(searchQuery);
+      setDebouncedSearchQuery(committedQuery);
     }, 1000);
     return () => window.clearTimeout(timerId);
   }, [searchQuery, showSearchBar]);
@@ -1945,6 +1946,11 @@ function App() {
     searchTokenRef.current += 1;
   }, []);
 
+  const commitSearchQuery = useCallback((query: string) => {
+    setDebouncedSearchQuery(query);
+    setActiveSearchResultIndex(0);
+  }, []);
+
   const moveSearchResult = useCallback((direction: 1 | -1) => {
     if (searchResults.length === 0) return;
     setActiveSearchResultIndex((previous) => {
@@ -3232,14 +3238,8 @@ function App() {
                   >
                     {tr("선택→목차", "Sel->Outline")}
                   </button>
-                  <span className="preview-selected-text" title={selectedPreviewText}>
-                    {normalizeOutlineTitle(selectedPreviewText).length > 0
-                      ? normalizeOutlineTitle(selectedPreviewText)
-                      : tr("본문에서 텍스트 선택 또는 영역 드래그", "Select text or drag area in page body")}
-                  </span>
-                </div>
-                {showSearchBar ? (
-                  <div className="preview-search-row">
+                  {showSearchBar ? (
+                    <>
                     <label className="inline-field preview-search-field">
                       <span>{tr("찾기", "Find")}</span>
                       <input
@@ -3252,6 +3252,10 @@ function App() {
                         onKeyDown={(event) => {
                           if (event.key === "Enter") {
                             event.preventDefault();
+                            if (searchQuery !== debouncedSearchQuery) {
+                              commitSearchQuery(searchQuery);
+                              return;
+                            }
                             moveSearchResult(event.shiftKey ? -1 : 1);
                           } else if (event.key === "Escape") {
                             event.preventDefault();
@@ -3299,8 +3303,15 @@ function App() {
                             ? tr("결과 없음", "No results")
                             : tr("검색어 입력", "Enter query")}
                     </span>
-                  </div>
-                ) : null}
+                    </>
+                  ) : (
+                    <span className="preview-selected-text" title={selectedPreviewText}>
+                      {normalizeOutlineTitle(selectedPreviewText).length > 0
+                        ? normalizeOutlineTitle(selectedPreviewText)
+                        : tr("본문에서 텍스트 선택 또는 영역 드래그", "Select text or drag area in page body")}
+                    </span>
+                  )}
+                </div>
                 <div
                   className={`preview-page-stack ${previewSecondaryPageSize.width > 0 ? "spread" : ""}`}
                   style={previewStackStyle}
