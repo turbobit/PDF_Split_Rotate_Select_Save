@@ -6,6 +6,7 @@ use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
 use tauri::{Manager, State};
+use tauri_plugin_window_state::Builder as WindowStateBuilder;
 
 #[derive(Default)]
 struct PendingPdfPaths {
@@ -50,6 +51,7 @@ fn create_main_like_window(app: &AppHandle) {
     let _ = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title("PDF 자르고 추기하고 돌려고 선택하여 저장하기")
         .inner_size(800.0, 600.0)
+        .visible(false)
         .build();
 }
 
@@ -80,7 +82,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            WindowStateBuilder::default()
+                .map_label(|label| {
+                    if label == "main" || label.starts_with("main-") {
+                        "main"
+                    } else {
+                        label
+                    }
+                })
+                .build(),
+        )
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
