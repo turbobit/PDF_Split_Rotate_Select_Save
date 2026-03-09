@@ -961,7 +961,7 @@ function App() {
       setPageOrder(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1));
       setActivePage(1);
       setPageInput("1");
-      setSelectedPages(new Set([1]));
+      setSelectedPages(new Set(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1)));
       setSidebarTab("thumbnails");
       setOutlinePanelMode("view");
       setRangeFromInput("");
