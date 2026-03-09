@@ -17,7 +17,7 @@ export const PREVIEW_TEXT_SPAN_LIMIT = 2600;
 export const ZOOM_MIN = 25;
 export const ZOOM_MAX = 400;
 export const ZOOM_STEP = 10;
-export const APP_VERSION = "0.1.3";
+export const APP_VERSION = "0.1.4";
 export const PROJECT_REPO_URL = "https://github.com/turbobit/PDF_Split_Rotate_Select_Save";
 
 export type SaveType = "pdf" | "png" | "jpg";
