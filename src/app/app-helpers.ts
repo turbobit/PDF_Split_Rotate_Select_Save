@@ -26,7 +26,7 @@ export type SidebarTab = "thumbnails" | "outline";
 export type OutlinePanelMode = "view" | "edit";
 export type StatusState =
   | { type: "ready" }
-  | { type: "loadingPdf" }
+  | { type: "loadingPdf"; phase?: "reading" | "opening" | "firstPage" }
   | { type: "loaded"; pages: number }
   | { type: "savingPdf" }
   | { type: "savedPdf"; pages: number }
@@ -73,6 +73,7 @@ export type PreviewTextSpan = {
   width: number;
   height: number;
   fontSize: number;
+  fontFamily: string;
   angleDeg: number;
 };
 
@@ -181,6 +182,7 @@ export type RichTextItemLike = TextItemLike & {
   transform: number[];
   width: number;
   height: number;
+  fontName?: string;
 };
 
 export function isRichTextItemLike(value: unknown): value is RichTextItemLike {
@@ -207,6 +209,7 @@ export function buildPreviewTextSpans(
   textItems: unknown[],
   viewportTransform: number[],
   viewportScale: number,
+  styles?: Record<string, { fontFamily?: string }>,
 ): PreviewTextSpan[] {
   const spans: PreviewTextSpan[] = [];
   let index = 0;
@@ -217,10 +220,11 @@ export function buildPreviewTextSpans(
     const tx = multiplyTransform(viewportTransform, item.transform);
     const fontHeight = Math.max(7, Math.hypot(tx[2], tx[3]));
     const width = Math.max(2, Math.abs(item.width * viewportScale));
-    const height = Math.max(fontHeight, Math.abs(item.height * viewportScale));
+    const height = fontHeight;
     const left = tx[4];
     const top = tx[5] - height;
     const angleDeg = (Math.atan2(tx[1], tx[0]) * 180) / Math.PI;
+    const fontFamily = item.fontName ? (styles?.[item.fontName]?.fontFamily ?? "sans-serif") : "sans-serif";
     spans.push({
       id: `span-${index}`,
       text,
@@ -229,9 +233,22 @@ export function buildPreviewTextSpans(
       width,
       height,
       fontSize: fontHeight,
+      fontFamily,
       angleDeg,
     });
     index += 1;
+    if (spans.length >= PREVIEW_TEXT_SPAN_LIMIT) break;
+  }
+  return spans;
+}
+
+export function buildSearchableTextSpans(textItems: unknown[]): string[] {
+  const spans: string[] = [];
+  for (const item of textItems) {
+    if (!isRichTextItemLike(item)) continue;
+    const text = normalizeOutlineTitle(item.str);
+    if (text.length === 0) continue;
+    spans.push(text);
     if (spans.length >= PREVIEW_TEXT_SPAN_LIMIT) break;
   }
   return spans;

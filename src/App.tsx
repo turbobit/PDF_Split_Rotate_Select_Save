@@ -12,7 +12,7 @@ import {
   type RenderTask,
 } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AddPdfModal from "./components/AddPdfModal";
 import MergePdfModal from "./components/MergePdfModal";
 import PdfInfoModal, { type PdfInfoField } from "./components/PdfInfoModal";
@@ -36,6 +36,7 @@ import {
   appendPageWithRotation,
   applyOutlineEntriesToPdfDocument,
   buildPreviewTextSpans,
+  buildSearchableTextSpans,
   clamp,
   cloneBytes,
   createExportUuid,
@@ -79,7 +80,8 @@ type ToolbarIconName =
   | "rangeRemove"
   | "save"
   | "singlePage"
-  | "doublePage";
+  | "doublePage"
+  | "search";
 
 function ToolbarIcon({ name }: { name: ToolbarIconName }) {
   const commonProps = {
@@ -198,6 +200,13 @@ function ToolbarIcon({ name }: { name: ToolbarIconName }) {
           <rect x="8.7" y="3" width="5.5" height="10" rx="0.9" />
         </svg>
       );
+    case "search":
+      return (
+        <svg {...commonProps}>
+          <circle cx="7" cy="7" r="3.5" />
+          <path d="M10 10l3 3" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -219,6 +228,7 @@ const SHORTCUT_LABELS = {
   nextPage: "PageDown",
   rotateLeft: "Ctrl+[",
   rotateRight: "Ctrl+]",
+  findInDocument: "Ctrl+F",
 } as const;
 
 function withShortcutHint(label: string, shortcut?: string): string {
@@ -236,6 +246,75 @@ function readStoredZoom(): number {
   const parsed = raw ? Number.parseInt(raw, 10) : 100;
   return clamp(Number.isFinite(parsed) ? parsed : 100, ZOOM_MIN, ZOOM_MAX);
 }
+
+const PAGE_LOAD_BATCH_SIZE = 24;
+const PAGE_LOAD_BATCH_DELAY_MS = 16;
+
+function normalizeSearchQuery(value: string): string {
+  return normalizeOutlineTitle(value).toLowerCase();
+}
+
+function buildPreviewCacheKey(pageNumber: number, rotation: number, scale: number): string {
+  return `${pageNumber}:${rotation}:${Math.round(scale * 1000)}`;
+}
+
+type PreviewTextLayerProps = {
+  spans: PreviewTextSpan[];
+  isAreaSelectMode: boolean;
+  onMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  activeSpanIndex: number | null;
+  matchedSpanIndexes: Set<number>;
+  normalizedSelectionRect: { left: number; top: number; right: number; bottom: number } | null;
+  layerRef: RefObject<HTMLDivElement | null>;
+};
+
+const PreviewTextLayer = memo(function PreviewTextLayer({
+  spans,
+  isAreaSelectMode,
+  onMouseDown,
+  activeSpanIndex,
+  matchedSpanIndexes,
+  normalizedSelectionRect,
+  layerRef,
+}: PreviewTextLayerProps) {
+  return (
+    <div
+      className={`preview-text-layer ${isAreaSelectMode ? "area-mode" : ""}`}
+      ref={layerRef}
+      onMouseDown={onMouseDown}
+    >
+      {spans.map((span, spanIndex) => (
+        <span
+          key={span.id}
+          className={`preview-text-span ${matchedSpanIndexes.has(spanIndex) ? "search-hit" : ""} ${activeSpanIndex === spanIndex ? "search-hit-active" : ""}`}
+          data-text={span.text}
+          style={{
+            left: `${span.left}px`,
+            top: `${span.top}px`,
+            width: `${span.width}px`,
+            height: `${span.height}px`,
+            fontSize: `${span.fontSize}px`,
+            fontFamily: span.fontFamily,
+            transform: `rotate(${span.angleDeg}deg)`,
+          }}
+        >
+          {span.text}
+        </span>
+      ))}
+      {normalizedSelectionRect ? (
+        <div
+          className="preview-selection-rect"
+          style={{
+            left: `${normalizedSelectionRect.left}px`,
+            top: `${normalizedSelectionRect.top}px`,
+            width: `${Math.max(0, normalizedSelectionRect.right - normalizedSelectionRect.left)}px`,
+            height: `${Math.max(0, normalizedSelectionRect.bottom - normalizedSelectionRect.top)}px`,
+          }}
+        />
+      ) : null}
+    </div>
+  );
+});
 
 function App() {
   const [locale, setLocale] = useState<Locale>(detectLocale);
@@ -297,11 +376,19 @@ function App() {
   const [isAreaSelectMode, setIsAreaSelectMode] = useState(false);
   const [isAreaSelecting, setIsAreaSelecting] = useState(false);
   const [previewSelectionRect, setPreviewSelectionRect] = useState<PreviewSelectionRect | null>(null);
+  const [showSearchBar, setShowSearchBar] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Array<{ pageNumber: number; spanIndex: number; text: string }>>([]);
+  const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
+  const [isSearchingDocument, setIsSearchingDocument] = useState(false);
   const [previewZoom, setPreviewZoom] = useState(readStoredZoom);
   const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "manual">(() => (window.localStorage.getItem("app.previewZoomMode") === "manual" ? "manual" : "fit"));
   const [previewSpreadMode, setPreviewSpreadMode] = useState<boolean>(() => window.localStorage.getItem("app.previewSpreadMode") === "1");
   const [pageRotations, setPageRotations] = useState<Record<number, number>>({});
   const [isPreviewFocused, setIsPreviewFocused] = useState(false);
+  const [isInitialPreviewReady, setIsInitialPreviewReady] = useState(false);
+  const [pendingHydrationPageCount, setPendingHydrationPageCount] = useState(0);
   const [draggingPage, setDraggingPage] = useState<number | null>(null);
   const [dropTargetPage, setDropTargetPage] = useState<number | null>(null);
   const [draggingPageIndex, setDraggingPageIndex] = useState<number | null>(null);
@@ -316,6 +403,7 @@ function App() {
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasSecondaryRef = useRef<HTMLCanvasElement | null>(null);
   const previewTextLayerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const thumbViewportRef = useRef<HTMLDivElement | null>(null);
   const outlineListRef = useRef<HTMLDivElement | null>(null);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
@@ -335,6 +423,12 @@ function App() {
   const lastWheelPageNavAtRef = useRef(0);
   const outlineEntriesRef = useRef<OutlineEntry[]>([]);
   const isLoadingOutlineRef = useRef(isLoadingOutline);
+  const selectedPagesRef = useRef<Set<number>>(new Set());
+  const progressivePageLoadTokenRef = useRef(0);
+  const progressivePageLoadTimerRef = useRef<number | null>(null);
+  const previewRenderCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const pageTextSearchCacheRef = useRef<Map<number, string[]>>(new Map());
+  const searchTokenRef = useRef(0);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -365,9 +459,31 @@ function App() {
     if (visibleEndIndex < visibleStartIndex) return [] as number[];
     return pageOrder.slice(visibleStartIndex, visibleEndIndex + 1);
   }, [pageOrder, visibleStartIndex, visibleEndIndex]);
+  const normalizedSearchQuery = useMemo(() => normalizeSearchQuery(debouncedSearchQuery), [debouncedSearchQuery]);
+  const currentPageSearchResults = useMemo(
+    () => searchResults.filter((result) => result.pageNumber === activePage),
+    [activePage, searchResults],
+  );
+  const currentPageMatchedSpanIndexes = useMemo(
+    () => new Set(currentPageSearchResults.map((result) => result.spanIndex)),
+    [currentPageSearchResults],
+  );
+  const activeSearchResult = useMemo(
+    () => (searchResults.length > 0 ? searchResults[clamp(activeSearchResultIndex, 0, searchResults.length - 1)] : null),
+    [activeSearchResultIndex, searchResults],
+  );
+  const activeSearchSpanIndex = useMemo(
+    () => (activeSearchResult?.pageNumber === activePage ? activeSearchResult.spanIndex : null),
+    [activePage, activeSearchResult],
+  );
   const statusText = useMemo(() => {
     if (status.type === "ready") return tr("PDF를 열어 작업을 시작하세요.", "Open a PDF to start.");
-    if (status.type === "loadingPdf") return tr("PDF 로딩 중...", "Loading PDF...");
+    if (status.type === "loadingPdf") {
+      if (status.phase === "reading") return tr("PDF 파일 읽는 중...", "Reading PDF file...");
+      if (status.phase === "opening") return tr("PDF 문서 여는 중...", "Opening PDF document...");
+      if (status.phase === "firstPage") return tr("첫 페이지 표시 준비 중...", "Preparing first page...");
+      return tr("PDF 로딩 중...", "Loading PDF...");
+    }
     if (status.type === "loaded") return tr(`총 ${status.pages}페이지 로딩 완료`, `Loaded ${status.pages} pages`);
     if (status.type === "savingPdf") return tr("선택 페이지를 PDF로 저장 중...", "Saving selected pages to PDF...");
     if (status.type === "savedPdf") return tr(`PDF 저장 완료 (${status.pages}페이지)`, `PDF saved (${status.pages} pages)`);
@@ -399,6 +515,23 @@ function App() {
   }, [previewSpreadMode]);
 
   useEffect(() => {
+    if (!showSearchBar) return;
+    const frameId = window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frameId);
+  }, [showSearchBar]);
+
+  useEffect(() => {
+    if (!showSearchBar) {
+      setDebouncedSearchQuery("");
+      return;
+    }
+    const timerId = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 1000);
+    return () => window.clearTimeout(timerId);
+  }, [searchQuery, showSearchBar]);
+
+  useEffect(() => {
     pageRotationsRef.current = pageRotations;
   }, [pageRotations]);
 
@@ -414,6 +547,10 @@ function App() {
     isLoadingOutlineRef.current = isLoadingOutline;
   }, [isLoadingOutline]);
 
+  useEffect(() => {
+    selectedPagesRef.current = selectedPages;
+  }, [selectedPages]);
+
   const showToast = useCallback((text: string) => {
     setToastText(text);
     if (toastTimerRef.current !== null) {
@@ -423,6 +560,12 @@ function App() {
       setToastText(null);
       toastTimerRef.current = null;
     }, 2200);
+  }, []);
+
+  const focusPreviewArea = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      previewInteractionRef.current?.focus();
+    });
   }, []);
 
   useEffect(() => {
@@ -452,6 +595,14 @@ function App() {
     setThumbnailUrls({});
     setThumbQueueCount(0);
     setThumbScrollTop(0);
+  }, []);
+
+  const cancelProgressivePageLoad = useCallback(() => {
+    progressivePageLoadTokenRef.current += 1;
+    if (progressivePageLoadTimerRef.current !== null) {
+      window.clearTimeout(progressivePageLoadTimerRef.current);
+      progressivePageLoadTimerRef.current = null;
+    }
   }, []);
 
   const clearPreviewCanvas = useCallback(() => {
@@ -512,10 +663,55 @@ function App() {
   }, []);
 
   useEffect(() => () => {
+    cancelProgressivePageLoad();
     clearThumbnailPipeline();
     if (pdfDocRef.current) void pdfDocRef.current.destroy();
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
-  }, [clearThumbnailPipeline]);
+  }, [cancelProgressivePageLoad, clearThumbnailPipeline]);
+
+  const hydratePageListInBackground = useCallback((totalPages: number) => {
+    if (totalPages <= 1) return;
+    const token = progressivePageLoadTokenRef.current;
+    let nextPage = 2;
+
+    const shouldContinueAutoSelect = (startPage: number) => {
+      const current = selectedPagesRef.current;
+      if (current.size !== startPage - 1) return false;
+      for (let pageNumber = 1; pageNumber < startPage; pageNumber += 1) {
+        if (!current.has(pageNumber)) return false;
+      }
+      return true;
+    };
+
+    const pump = () => {
+      if (progressivePageLoadTokenRef.current !== token) return;
+      const batchEnd = Math.min(totalPages, nextPage + PAGE_LOAD_BATCH_SIZE - 1);
+      const batch: number[] = [];
+      for (let pageNumber = nextPage; pageNumber <= batchEnd; pageNumber += 1) batch.push(pageNumber);
+      if (batch.length === 0) {
+        progressivePageLoadTimerRef.current = null;
+        return;
+      }
+
+      setPageOrder((prev) => [...prev, ...batch]);
+      if (shouldContinueAutoSelect(nextPage)) {
+        setSelectedPages((prev) => {
+          const next = new Set(prev);
+          for (const pageNumber of batch) next.add(pageNumber);
+          return next;
+        });
+      }
+
+      nextPage = batchEnd + 1;
+      if (nextPage <= totalPages) {
+        progressivePageLoadTimerRef.current = window.setTimeout(pump, PAGE_LOAD_BATCH_DELAY_MS);
+      } else {
+        progressivePageLoadTimerRef.current = null;
+      }
+    };
+
+    progressivePageLoadTimerRef.current = window.setTimeout(pump, PAGE_LOAD_BATCH_DELAY_MS);
+  }, []);
 
   const readOutlineEntriesFromDocument = useCallback(async (doc: PDFDocumentProxy): Promise<OutlineEntry[]> => {
     let timeoutHandle: number | null = null;
@@ -923,7 +1119,7 @@ function App() {
   }, [visiblePageNumbers]);
 
   useEffect(() => {
-    if (!pdfDoc || pageCount === 0) return;
+    if (!pdfDoc || pageCount === 0 || !isInitialPreviewReady) return;
     enqueueThumbnailPages([activePage, ...visiblePageNumbers], true);
     const prefetch: number[] = [];
     for (let offset = 1; offset <= THUMB_PREFETCH; offset += 1) {
@@ -933,7 +1129,57 @@ function App() {
       if (beforeIndex >= 0 && beforeIndex < pageOrder.length) prefetch.push(pageOrder[beforeIndex]);
     }
     enqueueThumbnailPages(prefetch, false);
-  }, [pdfDoc, pageCount, activePage, visiblePageNumbers, visibleEndIndex, visibleStartIndex, pageOrder, enqueueThumbnailPages]);
+  }, [pdfDoc, pageCount, isInitialPreviewReady, activePage, visiblePageNumbers, visibleEndIndex, visibleStartIndex, pageOrder, enqueueThumbnailPages]);
+
+  const drawCachedPreviewCanvas = useCallback((target: HTMLCanvasElement, source: HTMLCanvasElement, width: number, height: number) => {
+    target.width = source.width;
+    target.height = source.height;
+    target.style.width = `${Math.floor(width)}px`;
+    target.style.height = `${Math.floor(height)}px`;
+    const context = target.getContext("2d", { alpha: false });
+    if (!context) throw new Error("Cannot acquire preview canvas context.");
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, target.width, target.height);
+    context.drawImage(source, 0, 0);
+  }, []);
+
+  const prefetchPreviewPages = useCallback(async (
+    doc: PDFDocumentProxy,
+    pages: Array<{ pageNumber: number; rotation: number; scale: number }>,
+  ) => {
+    for (const target of pages) {
+      if (target.pageNumber < 1 || target.pageNumber > doc.numPages) continue;
+      const key = buildPreviewCacheKey(target.pageNumber, target.rotation, target.scale);
+      if (previewRenderCacheRef.current.has(key)) continue;
+      try {
+        const page = await doc.getPage(target.pageNumber);
+        const viewport = page.getViewport({ scale: target.scale, rotation: target.rotation });
+        const dpr = window.devicePixelRatio || 1;
+        const cachedCanvas = document.createElement("canvas");
+        cachedCanvas.width = Math.max(1, Math.floor(viewport.width * dpr));
+        cachedCanvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+        const context = cachedCanvas.getContext("2d", { alpha: false });
+        if (!context) continue;
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.clearRect(0, 0, viewport.width, viewport.height);
+        const task = page.render({ canvas: cachedCanvas, canvasContext: context, viewport, intent: "display" });
+        await task.promise;
+        previewRenderCacheRef.current.set(key, cachedCanvas);
+      } catch {
+        // Ignore prefetch failures; foreground render still handles actual display.
+      }
+    }
+  }, []);
+
+  const loadPageSearchItems = useCallback(async (doc: PDFDocumentProxy, pageNumber: number) => {
+    const cached = pageTextSearchCacheRef.current.get(pageNumber);
+    if (cached) return cached;
+    const page = await doc.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const items = buildSearchableTextSpans(textContent.items);
+    pageTextSearchCacheRef.current.set(pageNumber, items);
+    return items;
+  }, []);
 
   useEffect(() => {
     if (!pdfDoc || previewSize.width < 40 || previewSize.height < 40) return;
@@ -967,27 +1213,51 @@ function App() {
         const viewport = page.getViewport({ scale: cssScale, rotation });
         const secondaryViewport = secondaryPage ? secondaryPage.getViewport({ scale: cssScale, rotation: secondaryRotation }) : null;
         const dpr = window.devicePixelRatio || 1;
-        canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
-        canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
-        canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
-        const context = canvas.getContext("2d", { alpha: false });
-        if (!context) throw new Error("Cannot acquire preview canvas context.");
-        context.setTransform(dpr, 0, 0, dpr, 0, 0);
-        context.clearRect(0, 0, viewport.width, viewport.height);
-        renderTask = page.render({ canvas, canvasContext: context, viewport, intent: "display" });
-        await renderTask.promise;
+        const cacheKey = buildPreviewCacheKey(activePage, rotation, cssScale);
+        const cachedPrimary = previewRenderCacheRef.current.get(cacheKey);
+        if (cachedPrimary) {
+          drawCachedPreviewCanvas(canvas, cachedPrimary, viewport.width, viewport.height);
+        } else {
+          canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
+          canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+          canvas.style.width = `${Math.floor(viewport.width)}px`;
+          canvas.style.height = `${Math.floor(viewport.height)}px`;
+          const context = canvas.getContext("2d", { alpha: false });
+          if (!context) throw new Error("Cannot acquire preview canvas context.");
+          context.setTransform(dpr, 0, 0, dpr, 0, 0);
+          context.clearRect(0, 0, viewport.width, viewport.height);
+          renderTask = page.render({ canvas, canvasContext: context, viewport, intent: "display" });
+          await renderTask.promise;
+          const cachedCanvas = document.createElement("canvas");
+          cachedCanvas.width = canvas.width;
+          cachedCanvas.height = canvas.height;
+          const cachedContext = cachedCanvas.getContext("2d", { alpha: false });
+          if (cachedContext) cachedContext.drawImage(canvas, 0, 0);
+          previewRenderCacheRef.current.set(cacheKey, cachedCanvas);
+        }
         if (secondaryCanvas && secondaryViewport && secondaryPage) {
-          secondaryCanvas.width = Math.max(1, Math.floor(secondaryViewport.width * dpr));
-          secondaryCanvas.height = Math.max(1, Math.floor(secondaryViewport.height * dpr));
-          secondaryCanvas.style.width = `${Math.floor(secondaryViewport.width)}px`;
-          secondaryCanvas.style.height = `${Math.floor(secondaryViewport.height)}px`;
-          const secondaryContext = secondaryCanvas.getContext("2d", { alpha: false });
-          if (!secondaryContext) throw new Error("Cannot acquire preview canvas context.");
-          secondaryContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-          secondaryContext.clearRect(0, 0, secondaryViewport.width, secondaryViewport.height);
-          secondaryRenderTask = secondaryPage.render({ canvas: secondaryCanvas, canvasContext: secondaryContext, viewport: secondaryViewport, intent: "display" });
-          await secondaryRenderTask.promise;
+          const secondaryCacheKey = buildPreviewCacheKey(secondaryPageNumber ?? activePage, secondaryRotation, cssScale);
+          const cachedSecondary = previewRenderCacheRef.current.get(secondaryCacheKey);
+          if (cachedSecondary) {
+            drawCachedPreviewCanvas(secondaryCanvas, cachedSecondary, secondaryViewport.width, secondaryViewport.height);
+          } else {
+            secondaryCanvas.width = Math.max(1, Math.floor(secondaryViewport.width * dpr));
+            secondaryCanvas.height = Math.max(1, Math.floor(secondaryViewport.height * dpr));
+            secondaryCanvas.style.width = `${Math.floor(secondaryViewport.width)}px`;
+            secondaryCanvas.style.height = `${Math.floor(secondaryViewport.height)}px`;
+            const secondaryContext = secondaryCanvas.getContext("2d", { alpha: false });
+            if (!secondaryContext) throw new Error("Cannot acquire preview canvas context.");
+            secondaryContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+            secondaryContext.clearRect(0, 0, secondaryViewport.width, secondaryViewport.height);
+            secondaryRenderTask = secondaryPage.render({ canvas: secondaryCanvas, canvasContext: secondaryContext, viewport: secondaryViewport, intent: "display" });
+            await secondaryRenderTask.promise;
+            const cachedCanvas = document.createElement("canvas");
+            cachedCanvas.width = secondaryCanvas.width;
+            cachedCanvas.height = secondaryCanvas.height;
+            const cachedContext = cachedCanvas.getContext("2d", { alpha: false });
+            if (cachedContext) cachedContext.drawImage(secondaryCanvas, 0, 0);
+            previewRenderCacheRef.current.set(secondaryCacheKey, cachedCanvas);
+          }
         } else if (secondaryCanvas) {
           secondaryCanvas.width = 0;
           secondaryCanvas.height = 0;
@@ -1013,7 +1283,7 @@ function App() {
           try {
             const textContent = await page.getTextContent();
             if (cancelled) return;
-            setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale));
+            setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale, textContent.styles as Record<string, { fontFamily?: string }>));
           } catch (error) {
             const known = error as { name?: string };
             if (known.name !== "RenderingCancelledException" && !cancelled) {
@@ -1021,6 +1291,20 @@ function App() {
             }
           }
         }, 120);
+        if (activePage === 1 && !isInitialPreviewReady) {
+          setIsInitialPreviewReady(true);
+          setStatus({ type: "loaded", pages: pdfDoc.numPages });
+        }
+        void prefetchPreviewPages(
+          pdfDoc,
+          [activePage - 1, activePage + 1, activePage + 2]
+            .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
+            .map((pageNumber) => ({
+              pageNumber,
+              rotation: pageRotationsRef.current[pageNumber] ?? 0,
+              scale: cssScale,
+            })),
+        );
       } catch (error) {
         const known = error as { name?: string };
         if (known.name !== "RenderingCancelledException" && !cancelled) {
@@ -1035,9 +1319,60 @@ function App() {
       if (renderTask) renderTask.cancel();
       if (secondaryRenderTask) secondaryRenderTask.cancel();
     };
-  }, [pdfDoc, activePage, pageCount, pageRotations, previewSize, previewSpreadMode, previewZoom, previewZoomMode, tr]);
+  }, [drawCachedPreviewCanvas, pdfDoc, activePage, pageCount, pageRotations, prefetchPreviewPages, previewSize, previewSpreadMode, previewZoom, previewZoomMode, isInitialPreviewReady, tr]);
+
+  useEffect(() => {
+    if (!isInitialPreviewReady || pendingHydrationPageCount <= 1) return;
+    hydratePageListInBackground(pendingHydrationPageCount);
+    setPendingHydrationPageCount(0);
+  }, [hydratePageListInBackground, isInitialPreviewReady, pendingHydrationPageCount]);
+
+  useEffect(() => {
+    if (!pdfDoc || normalizedSearchQuery.length === 0) {
+      searchTokenRef.current += 1;
+      setSearchResults([]);
+      setActiveSearchResultIndex(0);
+      setIsSearchingDocument(false);
+      return;
+    }
+    let cancelled = false;
+    const token = searchTokenRef.current + 1;
+    searchTokenRef.current = token;
+    setIsSearchingDocument(true);
+    void (async () => {
+      const results: Array<{ pageNumber: number; spanIndex: number; text: string }> = [];
+      for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+        if (cancelled || searchTokenRef.current !== token) return;
+        const items = await loadPageSearchItems(pdfDoc, pageNumber);
+        items.forEach((text, spanIndex) => {
+          if (normalizeSearchQuery(text).includes(normalizedSearchQuery)) {
+            results.push({ pageNumber, spanIndex, text });
+          }
+        });
+        if (pageNumber % 4 === 0) {
+          setSearchResults([...results]);
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+      if (cancelled || searchTokenRef.current !== token) return;
+      setSearchResults(results);
+      setActiveSearchResultIndex(0);
+      setIsSearchingDocument(false);
+    })().catch((error) => {
+      if (cancelled || searchTokenRef.current !== token) return;
+      setIsSearchingDocument(false);
+      setErrorText(`${tr("본문 검색 실패", "Find in document failed")}: ${formatError(error)}`);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadPageSearchItems, normalizedSearchQuery, pdfDoc, tr]);
 
   const resetPdfWorkspace = useCallback(async () => {
+    cancelProgressivePageLoad();
+    previewRenderCacheRef.current.clear();
+    pageTextSearchCacheRef.current.clear();
+    searchTokenRef.current += 1;
     clearOutlineDragState();
     clearThumbnailPipeline();
     await replacePdfDocument(null);
@@ -1063,26 +1398,36 @@ function App() {
     setRangeFromInput("");
     setRangeToInput("");
     setIsAreaSelectMode(false);
+    setIsInitialPreviewReady(false);
+    setPendingHydrationPageCount(0);
+    setShowSearchBar(false);
+    setSearchQuery("");
+    setDebouncedSearchQuery("");
+    setSearchResults([]);
+    setActiveSearchResultIndex(0);
+    setIsSearchingDocument(false);
     setPageRotations({});
     pageRotationsRef.current = {};
-  }, [clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
+  }, [cancelProgressivePageLoad, clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
 
   const loadPdfFromPath = useCallback(async (path: string) => {
     setIsLoadingPdf(true);
-    setStatus({ type: "loadingPdf" });
+    setStatus({ type: "loadingPdf", phase: "reading" });
     try {
       await resetPdfWorkspace();
+      setStatus({ type: "loadingPdf", phase: "reading" });
       const fileBytes = new Uint8Array(await readFile(path));
+      setStatus({ type: "loadingPdf", phase: "opening" });
       const task = getDocument({ data: fileBytes });
       const loadedDoc = await task.promise;
       await replacePdfDocument(loadedDoc);
       setPdfPath(path);
       setPdfBytes(fileBytes);
       setPageCount(loadedDoc.numPages);
-      setPageOrder(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1));
+      setPageOrder(loadedDoc.numPages > 0 ? [1] : []);
       setActivePage(1);
       setPageInput("1");
-      setSelectedPages(new Set(Array.from({ length: loadedDoc.numPages }, (_, idx) => idx + 1)));
+      setSelectedPages(loadedDoc.numPages > 0 ? new Set([1]) : new Set());
       setSidebarTab("thumbnails");
       setOutlinePanelMode("view");
       setOutlineEntries([]);
@@ -1090,9 +1435,11 @@ function App() {
       setRangeFromInput("");
       setRangeToInput("");
       setIsAreaSelectMode(false);
+      setIsInitialPreviewReady(false);
+      setPendingHydrationPageCount(loadedDoc.numPages);
       setPageRotations({});
       pageRotationsRef.current = {};
-      setStatus({ type: "loaded", pages: loadedDoc.numPages });
+      setStatus({ type: "loadingPdf", phase: "firstPage" });
       return true;
     } catch (error) {
       setStatus({ type: "failed", reason: "pdfLoad" });
@@ -1584,6 +1931,30 @@ function App() {
     setPreviewZoom((previous) => clamp(previous + delta, ZOOM_MIN, ZOOM_MAX));
   }, []);
 
+  const openSearchBar = useCallback(() => {
+    setShowSearchBar(true);
+  }, []);
+
+  const closeSearchBar = useCallback(() => {
+    setShowSearchBar(false);
+    setSearchQuery("");
+    setDebouncedSearchQuery("");
+    setSearchResults([]);
+    setActiveSearchResultIndex(0);
+    setIsSearchingDocument(false);
+    searchTokenRef.current += 1;
+  }, []);
+
+  const moveSearchResult = useCallback((direction: 1 | -1) => {
+    if (searchResults.length === 0) return;
+    setActiveSearchResultIndex((previous) => {
+      const next = (previous + direction + searchResults.length) % searchResults.length;
+      const target = searchResults[next];
+      if (target) setActivePage(target.pageNumber);
+      return next;
+    });
+  }, [searchResults]);
+
   const resetZoom = useCallback(() => {
     setPreviewZoomMode("fit");
     setPreviewZoom(100);
@@ -1972,6 +2343,12 @@ function App() {
         void handleOpenPdf();
         return;
       }
+      if (ctrlOrMeta && !shift && key === "f") {
+        if (!pdfDoc) return;
+        event.preventDefault();
+        openSearchBar();
+        return;
+      }
       if (ctrlOrMeta && shift && key === "o") {
         if (editable) return;
         event.preventDefault();
@@ -2009,6 +2386,11 @@ function App() {
         return;
       }
       if (!editable && event.key === "Escape") {
+        if (showSearchBar) {
+          event.preventDefault();
+          closeSearchBar();
+          return;
+        }
         if (selectedPageNumbers.length === 0) return;
         event.preventDefault();
         setSelectedPages(new Set());
@@ -2061,6 +2443,7 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     applyRangeSelection,
+    closeSearchBar,
     handleClosePdf,
     handleMergePdfs,
     handleOpenAddPdfModal,
@@ -2069,11 +2452,13 @@ function App() {
     handleSaveSelection,
     isBusy,
     movePage,
+    openSearchBar,
     pageCount,
     pageNumbers,
     pdfDoc,
     rotateActivePage,
     selectedPageNumbers.length,
+    showSearchBar,
   ]);
 
   const loadPdfInfo = useCallback(async () => {
@@ -2376,19 +2761,19 @@ function App() {
           <div className="toolbar-line-break" aria-hidden="true" />
 
           <div className="action-group toolbar-block view-block">
-            <button className="ghost-btn" onClick={() => movePage(-1)} disabled={!pdfDoc || isBusy || activePage <= 1} title={withShortcutHint(tr("이전", "Previous"), SHORTCUT_LABELS.previousPage)}>{tr("이전", "Previous")}</button>
+            <button className="ghost-btn" onClick={() => { movePage(-1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage <= 1} title={withShortcutHint(tr("이전", "Previous"), SHORTCUT_LABELS.previousPage)}>{tr("이전", "Previous")}</button>
             <label className="inline-field page-field"><span>{tr("페이지", "Page")}</span>
               <input value={pageInput} onChange={(event) => setPageInput(event.currentTarget.value)} onBlur={goToPage} onKeyDown={(event) => { if (event.key === "Enter") goToPage(); }} inputMode="numeric" disabled={!pdfDoc || isBusy} />
             </label>
-            <button className="ghost-btn" onClick={goToPage} disabled={!pdfDoc || isBusy}>{tr("이동", "Go")}</button>
-            <button className="ghost-btn" onClick={() => movePage(1)} disabled={!pdfDoc || isBusy || activePage >= pageCount} title={withShortcutHint(tr("다음", "Next"), SHORTCUT_LABELS.nextPage)}>{tr("다음", "Next")}</button>
+            <button className="ghost-btn" onClick={() => { goToPage(); focusPreviewArea(); }} disabled={!pdfDoc || isBusy}>{tr("이동", "Go")}</button>
+            <button className="ghost-btn" onClick={() => { movePage(1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage >= pageCount} title={withShortcutHint(tr("다음", "Next"), SHORTCUT_LABELS.nextPage)}>{tr("다음", "Next")}</button>
           </div>
           <div className="action-group">
             <label className="inline-field zoom-field">
               <span>{tr("확대", "Zoom")}</span>
               <button
                 className="ghost-btn mini-btn"
-                onClick={() => adjustZoom(-ZOOM_STEP)}
+                onClick={() => { adjustZoom(-ZOOM_STEP); focusPreviewArea(); }}
                 disabled={!pdfDoc || isBusy}
                 type="button"
               >
@@ -2397,7 +2782,7 @@ function App() {
               <span className="zoom-value">{previewZoomMode === "fit" ? tr("맞춤", "Fit") : `${previewZoom}%`}</span>
               <button
                 className="ghost-btn mini-btn"
-                onClick={() => adjustZoom(ZOOM_STEP)}
+                onClick={() => { adjustZoom(ZOOM_STEP); focusPreviewArea(); }}
                 disabled={!pdfDoc || isBusy}
                 type="button"
               >
@@ -2405,7 +2790,7 @@ function App() {
               </button>
               <button
                 className="ghost-btn mini-btn"
-                onClick={resetZoom}
+                onClick={() => { resetZoom(); focusPreviewArea(); }}
                 disabled={!pdfDoc || isBusy}
                 type="button"
               >
@@ -2413,7 +2798,7 @@ function App() {
               </button>
               <button
                 className={`ghost-btn mini-btn ${!previewSpreadMode ? "tab-active" : ""}`}
-                onClick={() => setPreviewSpreadMode(false)}
+                onClick={() => { setPreviewSpreadMode(false); focusPreviewArea(); }}
                 disabled={!pdfDoc || isBusy}
                 type="button"
                 title={tr("한 페이지씩 보기", "Show one page at a time")}
@@ -2422,7 +2807,7 @@ function App() {
               </button>
               <button
                 className={`ghost-btn mini-btn ${previewSpreadMode ? "tab-active" : ""}`}
-                onClick={() => setPreviewSpreadMode(true)}
+                onClick={() => { setPreviewSpreadMode(true); focusPreviewArea(); }}
                 disabled={!pdfDoc || isBusy}
                 type="button"
                 title={tr("두 페이지씩 보기", "Show two pages at a time")}
@@ -2432,7 +2817,7 @@ function App() {
             </label>
             <button
               className="ghost-btn"
-              onClick={() => rotateActivePage(-90)}
+              onClick={() => { rotateActivePage(-90); focusPreviewArea(); }}
               disabled={!pdfDoc || isBusy}
               type="button"
               title={withShortcutHint(tr("왼쪽 회전", "Rotate Left"), SHORTCUT_LABELS.rotateLeft)}
@@ -2441,7 +2826,7 @@ function App() {
             </button>
             <button
               className="ghost-btn"
-              onClick={() => rotateActivePage(90)}
+              onClick={() => { rotateActivePage(90); focusPreviewArea(); }}
               disabled={!pdfDoc || isBusy}
               type="button"
               title={withShortcutHint(tr("오른쪽 회전", "Rotate Right"), SHORTCUT_LABELS.rotateRight)}
@@ -2802,6 +3187,16 @@ function App() {
               >
                 <div className="preview-tools">
                   <button
+                    className={`ghost-btn micro-btn ${showSearchBar ? "tab-active" : ""}`}
+                    onClick={showSearchBar ? closeSearchBar : openSearchBar}
+                    type="button"
+                    disabled={isBusy}
+                    title={withShortcutHint(tr("문서 검색", "Find in document"), SHORTCUT_LABELS.findInDocument)}
+                  >
+                    <ToolbarIcon name="search" />
+                    {tr("검색", "Find")}
+                  </button>
+                  <button
                     className="ghost-btn micro-btn"
                     onClick={addManualOutlineAtActivePage}
                     type="button"
@@ -2834,6 +3229,69 @@ function App() {
                       : tr("본문에서 텍스트 선택 또는 영역 드래그", "Select text or drag area in page body")}
                   </span>
                 </div>
+                {showSearchBar ? (
+                  <div className="preview-search-row">
+                    <label className="inline-field preview-search-field">
+                      <span>{tr("찾기", "Find")}</span>
+                      <input
+                        ref={searchInputRef}
+                        value={searchQuery}
+                        onChange={(event) => {
+                          setSearchQuery(event.currentTarget.value);
+                          setActiveSearchResultIndex(0);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            moveSearchResult(event.shiftKey ? -1 : 1);
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            closeSearchBar();
+                          }
+                        }}
+                        placeholder={tr("본문 검색어 입력", "Type text to find")}
+                        disabled={!pdfDoc || isBusy}
+                      />
+                    </label>
+                    <button
+                      className="ghost-btn micro-btn"
+                      type="button"
+                      onClick={() => moveSearchResult(-1)}
+                      disabled={searchResults.length === 0}
+                      title={tr("이전 검색 결과", "Previous match")}
+                    >
+                      {tr("이전결과", "Prev")}
+                    </button>
+                    <button
+                      className="ghost-btn micro-btn"
+                      type="button"
+                      onClick={() => moveSearchResult(1)}
+                      disabled={searchResults.length === 0}
+                      title={tr("다음 검색 결과", "Next match")}
+                    >
+                      {tr("다음결과", "Next")}
+                    </button>
+                    <button
+                      className="ghost-btn micro-btn"
+                      type="button"
+                      onClick={closeSearchBar}
+                      title={tr("검색 취소", "Cancel search")}
+                    >
+                      {tr("검색취소", "Cancel")}
+                    </button>
+                    <span className="preview-search-status">
+                      {isSearchingDocument
+                        ? tr("검색 중...", "Searching...")
+                        : showSearchBar && searchQuery !== debouncedSearchQuery
+                          ? tr("입력 대기...", "Waiting for pause...")
+                        : searchResults.length > 0
+                          ? `${activeSearchResult ? clamp(activeSearchResultIndex, 0, searchResults.length - 1) + 1 : 0}/${searchResults.length}`
+                          : normalizedSearchQuery.length > 0
+                            ? tr("결과 없음", "No results")
+                            : tr("검색어 입력", "Enter query")}
+                    </span>
+                  </div>
+                ) : null}
                 <div
                   className={`preview-page-stack ${previewSecondaryPageSize.width > 0 ? "spread" : ""}`}
                   style={previewStackStyle}
@@ -2846,40 +3304,15 @@ function App() {
                     }}
                   >
                     <canvas ref={previewCanvasRef} />
-                    <div
-                      className={`preview-text-layer ${isAreaSelectMode ? "area-mode" : ""}`}
-                      ref={previewTextLayerRef}
+                    <PreviewTextLayer
+                      spans={previewTextSpans}
+                      isAreaSelectMode={isAreaSelectMode}
                       onMouseDown={handlePreviewTextLayerMouseDown}
-                    >
-                      {previewTextSpans.map((span) => (
-                        <span
-                          key={span.id}
-                          className="preview-text-span"
-                          data-text={span.text}
-                          style={{
-                            left: `${span.left}px`,
-                            top: `${span.top}px`,
-                            width: `${span.width}px`,
-                            height: `${span.height}px`,
-                            fontSize: `${span.fontSize}px`,
-                            transform: `rotate(${span.angleDeg}deg)`,
-                          }}
-                        >
-                          {span.text}
-                        </span>
-                      ))}
-                      {normalizedPreviewSelectionRect ? (
-                        <div
-                          className="preview-selection-rect"
-                          style={{
-                            left: `${normalizedPreviewSelectionRect.left}px`,
-                            top: `${normalizedPreviewSelectionRect.top}px`,
-                            width: `${Math.max(0, normalizedPreviewSelectionRect.right - normalizedPreviewSelectionRect.left)}px`,
-                            height: `${Math.max(0, normalizedPreviewSelectionRect.bottom - normalizedPreviewSelectionRect.top)}px`,
-                          }}
-                        />
-                      ) : null}
-                    </div>
+                      activeSpanIndex={activeSearchSpanIndex}
+                      matchedSpanIndexes={currentPageMatchedSpanIndexes}
+                      normalizedSelectionRect={normalizedPreviewSelectionRect}
+                      layerRef={previewTextLayerRef}
+                    />
                   </div>
                   {previewSecondaryPageSize.width > 0 ? (
                     <div

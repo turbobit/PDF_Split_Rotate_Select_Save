@@ -380,6 +380,7 @@ input:disabled {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  background: #fff;
 }
 
 .sidebar-head {
@@ -764,7 +765,7 @@ input:disabled {
   align-items: center;
   gap: 8px;
   padding: 16px;
-  background: radial-gradient(circle at 20% 10%, #fff8ef 0%, transparent 40%);
+  background: radial-gradient(circle at 20% 10%, #fff8ef 0%, #fff 40%);
   outline: none;
 }
 
@@ -825,6 +826,16 @@ input:disabled {
   background: rgba(76, 146, 255, 0.36);
 }
 
+.preview-text-span.search-hit {
+  background: rgba(255, 214, 10, 0.12);
+  box-shadow: inset 0 -1px 0 rgba(211, 160, 0, 0.5);
+}
+
+.preview-text-span.search-hit-active {
+  background: rgba(255, 163, 26, 0.18);
+  box-shadow: inset 0 -2px 0 rgba(194, 112, 0, 0.75);
+}
+
 .preview-selection-rect {
   position: absolute;
   border: 1px dashed #2e77da;
@@ -837,6 +848,30 @@ input:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.preview-search-row {
+  width: min(100%, 920px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.preview-search-field {
+  flex: 1;
+  min-width: 240px;
+}
+
+.preview-search-field input {
+  min-width: 220px;
+}
+
+.preview-search-status {
+  min-width: 72px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
 }
 
 .preview-selected-text {
