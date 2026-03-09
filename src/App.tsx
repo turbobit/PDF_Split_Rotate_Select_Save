@@ -1284,9 +1284,12 @@ function App() {
           try {
             const textContent = await page.getTextContent();
             if (cancelled) return;
+
             setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale, textContent.styles as Record<string, { fontFamily?: string }>));
           } catch (error) {
-            const known = error as { name?: string };
+            const known = error as { name?: string; message?: string };
+            console.error("PDF.js 텍스트 레이어 로딩 에러:", error);
+
             if (known.name !== "RenderingCancelledException" && !cancelled) {
               setErrorText(`${tr("본문 텍스트 레이어 로딩 실패", "Failed to load text layer")}: ${formatError(error)}`);
             }
