@@ -12,7 +12,7 @@ import {
   type RenderTask,
 } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { memo, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AddPdfModal from "./components/AddPdfModal";
 import MergePdfModal from "./components/MergePdfModal";
 import PdfInfoModal, { type PdfInfoField } from "./components/PdfInfoModal";
@@ -63,9 +63,12 @@ import {
   type SidebarTab,
   type StatusState,
 } from "./app/app-helpers";
+import { loadAppSettings, saveAppSettings } from "./app/settings-store";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
+
+const AiChatPanel = lazy(() => import("./components/AiChatPanel"));
 
 type ToolbarIconName =
   | "open"
@@ -362,6 +365,8 @@ function App() {
   const [pdfInfoMetadataFields, setPdfInfoMetadataFields] = useState<PdfInfoField[]>([]);
   const [pdfInfoFontNames, setPdfInfoFontNames] = useState<string[]>([]);
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState<boolean>(() => window.localStorage.getItem("app.toolbarCollapsed") === "1");
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [hasHydratedStoredSettings, setHasHydratedStoredSettings] = useState(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<number, string>>({});
@@ -429,6 +434,7 @@ function App() {
   const previewRenderCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const pageTextSearchCacheRef = useRef<Map<number, string[]>>(new Map());
   const searchTokenRef = useRef(0);
+  const pendingAiCitationJumpRef = useRef<{ pageNumber: number; query: string } | null>(null);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -495,24 +501,68 @@ function App() {
   }, [status, tr]);
 
   useEffect(() => {
-    window.localStorage.setItem("app.locale", locale);
-  }, [locale]);
+    let cancelled = false;
+    void loadAppSettings()
+      .then((bundle) => {
+        if (cancelled) return;
+        const settings = bundle.settings;
+        const storedLocale = settings["app.locale"];
+        const storedToolbarCollapsed = settings["app.toolbarCollapsed"];
+        const storedPreviewZoom = settings["app.previewZoom"];
+        const storedPreviewZoomMode = settings["app.previewZoomMode"];
+        const storedPreviewSpreadMode = settings["app.previewSpreadMode"];
+        const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
+        const storedAiPanelOpen = settings["ai.panelOpen"];
+
+        if (storedLocale === "ko" || storedLocale === "en") setLocale(storedLocale);
+        if (typeof storedToolbarCollapsed === "boolean") setIsToolbarCollapsed(storedToolbarCollapsed);
+        if (typeof storedPreviewZoom === "number") {
+          setPreviewZoom(clamp(Math.round(storedPreviewZoom), ZOOM_MIN, ZOOM_MAX));
+        }
+        if (storedPreviewZoomMode === "fit" || storedPreviewZoomMode === "manual") {
+          setPreviewZoomMode(storedPreviewZoomMode);
+        }
+        if (typeof storedPreviewSpreadMode === "boolean") setPreviewSpreadMode(storedPreviewSpreadMode);
+        if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
+        if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
+        setHasHydratedStoredSettings(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setErrorText(`${tr("앱 설정 로딩 실패", "Failed to load app settings")}: ${formatError(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tr]);
 
   useEffect(() => {
-    window.localStorage.setItem("app.toolbarCollapsed", isToolbarCollapsed ? "1" : "0");
-  }, [isToolbarCollapsed]);
-
-  useEffect(() => {
-    window.localStorage.setItem("app.previewZoom", String(previewZoom));
-  }, [previewZoom]);
-
-  useEffect(() => {
-    window.localStorage.setItem("app.previewZoomMode", previewZoomMode);
-  }, [previewZoomMode]);
-
-  useEffect(() => {
-    window.localStorage.setItem("app.previewSpreadMode", previewSpreadMode ? "1" : "0");
-  }, [previewSpreadMode]);
+    if (!hasHydratedStoredSettings) return;
+    const timerId = window.setTimeout(() => {
+      void saveAppSettings({
+        "app.locale": locale,
+        "app.toolbarCollapsed": isToolbarCollapsed,
+        "app.previewZoom": previewZoom,
+        "app.previewZoomMode": previewZoomMode,
+        "app.previewSpreadMode": previewSpreadMode,
+        "app.openExplorerAfterSave": openExplorerAfterSave,
+        "ai.panelOpen": showAiPanel,
+      }).catch((error) => {
+        setErrorText(`${tr("앱 설정 저장 실패", "Failed to save app settings")}: ${formatError(error)}`);
+      });
+    }, 140);
+    return () => window.clearTimeout(timerId);
+  }, [
+    hasHydratedStoredSettings,
+    isToolbarCollapsed,
+    locale,
+    openExplorerAfterSave,
+    previewSpreadMode,
+    previewZoom,
+    previewZoomMode,
+    showAiPanel,
+    tr,
+  ]);
 
   useEffect(() => {
     if (!showSearchBar) return;
@@ -567,6 +617,14 @@ function App() {
     window.requestAnimationFrame(() => {
       previewInteractionRef.current?.focus();
     });
+  }, []);
+
+  const buildAiCitationSearchQuery = useCallback((text: string) => {
+    const tokens = normalizeSearchQuery(text)
+      .split(" ")
+      .filter(Boolean)
+      .slice(0, 6);
+    return tokens.join(" ");
   }, []);
 
   useEffect(() => {
@@ -1372,6 +1430,23 @@ function App() {
     };
   }, [loadPageSearchItems, normalizedSearchQuery, pdfDoc, tr]);
 
+  useEffect(() => {
+    const pendingJump = pendingAiCitationJumpRef.current;
+    if (!pendingJump || searchResults.length === 0) return;
+    const targetIndex = searchResults.findIndex((result) => (
+      result.pageNumber === pendingJump.pageNumber
+      && normalizeSearchQuery(result.text).includes(pendingJump.query)
+    ));
+    const fallbackIndex = searchResults.findIndex((result) => result.pageNumber === pendingJump.pageNumber);
+    const nextIndex = targetIndex >= 0 ? targetIndex : fallbackIndex;
+    if (nextIndex < 0) return;
+    const target = searchResults[nextIndex];
+    pendingAiCitationJumpRef.current = null;
+    setActivePage(target.pageNumber);
+    setActiveSearchResultIndex(nextIndex);
+    focusPreviewArea();
+  }, [focusPreviewArea, searchResults]);
+
   const resetPdfWorkspace = useCallback(async () => {
     cancelProgressivePageLoad();
     previewRenderCacheRef.current.clear();
@@ -1953,6 +2028,24 @@ function App() {
     setDebouncedSearchQuery(query);
     setActiveSearchResultIndex(0);
   }, []);
+
+  const handleJumpToAiCitation = useCallback((snippet: { pageNumber: number; content: string }) => {
+    if (!pdfDoc) return;
+    const query = buildAiCitationSearchQuery(snippet.content);
+    setActivePage(clamp(snippet.pageNumber, 1, Math.max(1, pageCount)));
+    if (query.length > 0) {
+      pendingAiCitationJumpRef.current = {
+        pageNumber: clamp(snippet.pageNumber, 1, Math.max(1, pageCount)),
+        query: normalizeSearchQuery(query),
+      };
+      openSearchBar();
+      setSearchQuery(query);
+      commitSearchQuery(query);
+    } else {
+      pendingAiCitationJumpRef.current = null;
+    }
+    focusPreviewArea();
+  }, [buildAiCitationSearchQuery, commitSearchQuery, focusPreviewArea, openSearchBar, pageCount, pdfDoc]);
 
   const moveSearchResult = useCallback((direction: 1 | -1) => {
     if (searchResults.length === 0) return;
@@ -2625,6 +2718,14 @@ function App() {
           </div>
           <div className="toolbar-head-actions">
             <button
+              className={`ghost-btn toolbar-toggle-btn ${showAiPanel ? "tab-active" : ""}`}
+              type="button"
+              onClick={() => setShowAiPanel((prev) => !prev)}
+              title={showAiPanel ? tr("AI 대화창 닫기", "Hide AI chat") : tr("AI 대화창 열기", "Show AI chat")}
+            >
+              {tr("AI대화", "AI Chat")}
+            </button>
+            <button
               className="ghost-btn toolbar-toggle-btn"
               type="button"
               onClick={() => setIsToolbarCollapsed((prev) => !prev)}
@@ -2851,7 +2952,7 @@ function App() {
       {errorText ? <section className="panel error-banner">{errorText}</section> : null}
       {toastText ? <section className="toast-banner">{toastText}</section> : null}
 
-      <main className="workspace">
+      <main className={`workspace ${showAiPanel ? "with-ai" : ""}`}>
         <aside className="panel sidebar">
           <div className="sidebar-head">
             <strong>{pdfPath ? normalizeFileStem(pdfPath) : tr("불러온 PDF 없음", "No PDF loaded")}</strong>
@@ -3355,6 +3456,19 @@ function App() {
             <div className="empty-panel">{tr("선택한 페이지가 오른쪽에 크게 표시됩니다.", "Large page preview appears here.")}</div>
           )}
         </section>
+
+        {showAiPanel ? (
+          <Suspense fallback={<aside className="panel ai-panel"><div className="empty-panel">{tr("AI 패널 로딩 중...", "Loading AI panel...")}</div></aside>}>
+            <AiChatPanel
+              tr={tr}
+              pdfDoc={pdfDoc}
+              pdfBytes={pdfBytes}
+              pdfPath={pdfPath}
+              isBusy={isBusy}
+              onJumpToCitation={handleJumpToAiCitation}
+            />
+          </Suspense>
+        ) : null}
       </main>
 
       <MergePdfModal
