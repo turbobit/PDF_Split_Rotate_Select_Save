@@ -2722,7 +2722,7 @@ pub fn run() {
             config_dir,
             database_path,
             http: reqwest::Client::builder()
-                .user_agent("PDF_Split_Rotate_Select_Save/0.1.5")
+                .user_agent("PDF_Split_Rotate_Select_Save/0.1.6")
                 .build()
                 .expect("failed to build HTTP client"),
         })
