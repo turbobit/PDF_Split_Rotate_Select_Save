@@ -182,7 +182,7 @@ function buildKoreanReleaseNotes({ tag, compareLine, commits, artifacts }) {
     `## ${tag} 릴리스 노트`,
     "",
     "### 요약",
-    "- PDF Split Rotate Select Save 데스크톱 앱 배포",
+    "- PDF Split Rotate Select Save AI 데스크톱 앱 배포",
     `- 릴리스 날짜: ${date}`,
     compareLine,
     "",
@@ -229,7 +229,7 @@ if (!version) {
 }
 
 const tag = `v${version}`;
-const releaseTitle = `PDF Split Rotate Select Save ${tag} 릴리스`;
+const releaseTitle = `PDF Split Rotate Select Save AI ${tag} 릴리스`;
 
 ensureGhInstalled();
 

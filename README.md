@@ -1,4 +1,4 @@
-# PDF Split Rotate Select Save
+# PDF Split Rotate Select Save AI
 
 Desktop app built with Tauri + React for fast local PDF split, reorder, rotate, merge, and export workflows.
 

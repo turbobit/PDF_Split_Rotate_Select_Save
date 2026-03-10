@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PDFSplitRotateSelectSave",
+  "productName": "PDFSplitRotateSelectSaveAI",
   "version": "0.1.6",
-  "identifier": "com.user.tauri-app",
+  "identifier": "com.user.pdfsplitrotateselectsaveai",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

@@ -24,6 +24,7 @@ const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
 const appVersion = packageJson.version || tauriConfig.version || "0.0.0";
 const productName = tauriConfig.productName || packageJson.name || "app";
+const linuxBuildEnabled = process.env.TAURI_ENABLE_LINUX_BUILD === "1";
 
 function runCommand(commandName, commandArgs, options = {}) {
   return spawnSync(commandName, commandArgs, {
@@ -230,6 +231,12 @@ function linuxCrossReady(installedTargets) {
 function buildPlans(extraArgs, installedTargets) {
   const windowsReady = windowsCrossReady(installedTargets);
   const linuxReady = linuxCrossReady(installedTargets);
+  const linuxSupported = process.platform === "linux"
+    ? linuxBuildEnabled
+    : linuxBuildEnabled && linuxReady.ok;
+  const linuxReason = linuxBuildEnabled
+    ? (process.platform === "linux" ? "" : linuxReady.reason)
+    : "Linux 빌드는 현재 기본값으로 비활성화되어 있습니다. TAURI_ENABLE_LINUX_BUILD=1 로 다시 켤 수 있습니다.";
   return [
     {
       label: "Windows",
@@ -256,13 +263,13 @@ function buildPlans(extraArgs, installedTargets) {
     {
       label: "Linux",
       targetTriple: process.platform === "linux" ? null : "linux/amd64",
-      supported: process.platform === "linux" || linuxReady.ok,
-      reason: process.platform === "linux" ? "" : linuxReady.reason,
+      supported: linuxSupported,
+      reason: linuxReason,
       args: process.platform === "linux"
         ? ["build", ...extraArgs]
         : ["build", ...extraArgs],
       mode: process.platform === "linux" ? "native bundle" : "docker native bundle",
-      canAttempt: process.platform === "linux" || linuxReady.ok,
+      canAttempt: linuxSupported,
       env: process.env,
       runner: process.platform === "linux" ? "tauri" : "docker-linux",
       artifactRoot: process.platform === "linux"
@@ -297,27 +304,27 @@ function buildDoctor(plans, installedTargets) {
     { name: "macOS Xcode CLI", status: formatBool(commandExists("xcrun")), detail: "macOS native bundle toolchain" },
     { name: "Windows mingw gcc", status: formatBool(hasMingwGcc), detail: "x86_64-w64-mingw32-gcc" },
     { name: "Windows mingw dlltool", status: formatBool(hasMingwDlltool), detail: "x86_64-w64-mingw32-dlltool" },
-    { name: "Linux docker", status: formatBool(hasDocker), detail: "컨테이너 빌드 런타임" },
-    { name: "Linux colima", status: formatMaybe(hasColima), detail: "macOS용 Docker daemon 런타임" },
-    { name: "Linux docker buildx", status: formatBool(hasDockerBuildx), detail: "linux/amd64 builder image 생성" },
-    { name: "Linux docker daemon", status: formatBool(dockerDaemonReady), detail: "docker info 응답 여부" },
+    { name: "Linux docker", status: linuxBuildEnabled ? formatBool(hasDocker) : "SKIPPED", detail: linuxBuildEnabled ? "컨테이너 빌드 런타임" : "Linux 빌드 비활성화 상태" },
+    { name: "Linux colima", status: linuxBuildEnabled ? formatMaybe(hasColima) : "SKIPPED", detail: linuxBuildEnabled ? "macOS용 Docker daemon 런타임" : "Linux 빌드 비활성화 상태" },
+    { name: "Linux docker buildx", status: linuxBuildEnabled ? formatBool(hasDockerBuildx) : "SKIPPED", detail: linuxBuildEnabled ? "linux/amd64 builder image 생성" : "Linux 빌드 비활성화 상태" },
+    { name: "Linux docker daemon", status: linuxBuildEnabled ? formatBool(dockerDaemonReady) : "SKIPPED", detail: linuxBuildEnabled ? "docker info 응답 여부" : "Linux 빌드 비활성화 상태" },
   ];
   const targetRows = plans
     .filter((plan) => plan.targetTriple)
     .map((plan) => {
       const ready = plan.targetTriple === "linux/amd64"
-        ? dockerDaemonReady && hasDockerBuildx
+        ? (linuxBuildEnabled ? dockerDaemonReady && hasDockerBuildx : false)
         : installedTargets.has(plan.targetTriple);
       return {
         name: `${plan.label} target`,
-        status: formatBool(ready),
+        status: plan.targetTriple === "linux/amd64" && !linuxBuildEnabled ? "SKIPPED" : formatBool(ready),
         detail: plan.targetTriple,
       };
     });
   const summaryRows = plans.map((plan) => ({
     name: plan.label,
-    status: plan.canAttempt ? "OK" : "MISSING",
-    detail: plan.canAttempt ? `빌드 가능 (${plan.mode})` : `빌드 불가: ${plan.reason}`,
+    status: plan.label === "Linux" && !linuxBuildEnabled ? "SKIPPED" : (plan.canAttempt ? "OK" : "MISSING"),
+    detail: plan.canAttempt ? `빌드 가능 (${plan.mode})` : `${plan.label === "Linux" && !linuxBuildEnabled ? "빌드 비활성화" : "빌드 불가"}: ${plan.reason}`,
   }));
 
   console.log("[tauri-build][doctor] 사전 점검");
@@ -339,10 +346,10 @@ function buildDoctor(plans, installedTargets) {
       || !hasCargoZigbuild
       || !hasMingwGcc
       || !hasMingwDlltool
-      || !hasDocker
-      || !dockerDaemonReady
-      || !hasColima
-      || !hasDockerBuildx
+      || (linuxBuildEnabled && !hasDocker)
+      || (linuxBuildEnabled && !dockerDaemonReady)
+      || (linuxBuildEnabled && !hasColima)
+      || (linuxBuildEnabled && !hasDockerBuildx)
     ) {
       console.log("[tauri-build][doctor] macOS 크로스 빌드 준비 안내:");
       for (const target of missingTargets) {
@@ -357,14 +364,14 @@ function buildDoctor(plans, installedTargets) {
       if (!hasMingwGcc || !hasMingwDlltool) {
         console.log("[tauri-build][doctor]   brew install mingw-w64");
       }
-      if (!hasDocker || !hasColima) {
+      if (linuxBuildEnabled && (!hasDocker || !hasColima)) {
         console.log("[tauri-build][doctor]   brew install docker colima");
       }
-      if (!hasDockerBuildx) {
+      if (linuxBuildEnabled && !hasDockerBuildx) {
         console.log("[tauri-build][doctor]   brew install docker-buildx");
         console.log("[tauri-build][doctor]   ~/.docker/config.json 에 cliPluginsExtraDirs 추가");
       }
-      if (!dockerDaemonReady) {
+      if (linuxBuildEnabled && !dockerDaemonReady) {
         console.log("[tauri-build][doctor]   colima start");
       }
     }
@@ -502,7 +509,14 @@ function renameBundleArtifacts(plan, version) {
     const stats = statSync(fullPath);
     if (!stats.isFile()) continue;
     if ([".dll", ".dylib", ".so", ".a"].includes(extname(entry))) continue;
-    if (entry === productName || entry === packageJson.name || entry === "tauri-app" || entry === "tauri-app.exe") {
+    if (
+      entry === productName
+      || entry === `${productName}.exe`
+      || entry === packageJson.name
+      || entry === `${packageJson.name}.exe`
+      || entry === "tauri-app"
+      || entry === "tauri-app.exe"
+    ) {
       renamed.push(renameArtifactIfNeeded(fullPath, version));
     }
   }
@@ -571,7 +585,7 @@ function dockerVolume(name) {
   return `${name}:/` + name.split("_").slice(2).join("_");
 }
 
-function runLinuxDockerBuild(extraArgs) {
+function runLinuxDockerBuild(extraArgs, envOverride = process.env) {
   const imageStatus = ensureLinuxDockerImage();
   if (imageStatus !== 0) return imageStatus;
 
@@ -587,6 +601,8 @@ function runLinuxDockerBuild(extraArgs) {
     "--rm",
     "--platform",
     "linux/amd64",
+    "-e",
+    `TAURI_SKIP_CLEAN_BUILD=${envOverride.TAURI_SKIP_CLEAN_BUILD ?? ""}`,
     "-v",
     `${rootDir}:/work`,
     "-v",
@@ -651,6 +667,7 @@ const installedTargets = getInstalledRustTargets();
 const plans = buildPlans(rest, installedTargets);
 const failures = [];
 const results = [];
+let cleanedOnce = false;
 
 buildDoctor(plans, installedTargets);
 console.log(`[tauri-build] Host: ${hostPlatformName()}`);
@@ -663,14 +680,18 @@ for (const plan of plans) {
 
   const targetText = plan.targetTriple ? ` (${plan.targetTriple})` : "";
   console.log(`[tauri-build] ${plan.label}${targetText} 빌드를 시작합니다. 모드: ${plan.mode}`);
+  const envForRun = cleanedOnce
+    ? { ...plan.env, TAURI_SKIP_CLEAN_BUILD: "1" }
+    : plan.env;
   const status = plan.runner === "docker-linux"
-    ? runLinuxDockerBuild(rest)
-    : runTauri(plan.args, plan.env);
+    ? runLinuxDockerBuild(rest, envForRun)
+    : runTauri(plan.args, envForRun);
   if (status !== 0) {
     failures.push(plan.label);
     results.push({ label: plan.label, status: "failed", artifacts: [] });
     console.error(`[tauri-build] ${plan.label} 빌드가 실패했습니다. 다음 빌드를 계속 진행합니다.`);
   } else {
+    cleanedOnce = true;
     renameBundleArtifacts(plan, appVersion);
     results.push({ label: plan.label, status: "ok", artifacts: summarizeArtifacts(plan) });
     console.log(`[tauri-build] ${plan.label} 빌드가 완료되었습니다.`);
