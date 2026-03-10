@@ -75,6 +75,22 @@ function tryRunCapture(command) {
   }
 }
 
+function ensureGhInstalled() {
+  const version = tryRunCapture("gh --version");
+  if (version) {
+    const firstLine = version.split(/\r?\n/)[0]?.trim();
+    console.log(`[release] GitHub CLI 확인됨: ${firstLine}`);
+    return;
+  }
+
+  console.error("[release] GitHub CLI(gh)를 찾지 못했습니다.");
+  console.error("[release] npm run release 전에 gh를 설치하고 로그인해야 합니다.");
+  console.error("[release] 설치 안내: https://cli.github.com/");
+  console.error("[release] macOS 예시: brew install gh");
+  console.error("[release] 설치 후 로그인: gh auth login");
+  process.exit(1);
+}
+
 function ensureTagSynced(tag) {
   console.log(`[release] Syncing git tags...`);
   run("git fetch --tags --force");
@@ -214,6 +230,8 @@ if (!version) {
 
 const tag = `v${version}`;
 const releaseTitle = `PDF Split Rotate Select Save ${tag} 릴리스`;
+
+ensureGhInstalled();
 
 const { headCommit, tagCommit } = ensureTagSynced(tag);
 const sameVersionUpdate = tagCommit && tagCommit !== headCommit;
