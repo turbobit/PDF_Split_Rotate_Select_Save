@@ -24,7 +24,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["msi", "nsis"],
+    "windows": {
+      "webviewInstallMode": "embedBootstrapper"
+    },
     "fileAssociations": [
       {
         "ext": ["pdf"],

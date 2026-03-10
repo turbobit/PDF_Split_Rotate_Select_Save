@@ -89,13 +89,23 @@ function isReleaseArtifact(pathValue) {
   ].some((suffix) => lowerPath.endsWith(suffix));
 }
 
+function getReleaseCandidateDirs() {
+  switch (process.platform) {
+    case "win32":
+      return [bundleDir, macReleaseDir];
+    case "darwin":
+      return [bundleDir, macReleaseDir, windowsReleaseDir, linuxReleaseDir];
+    case "linux":
+      return [bundleDir, macReleaseDir];
+    default:
+      return [bundleDir, macReleaseDir];
+  }
+}
+
 function collectReleaseArtifacts() {
-  const candidates = [
-    ...collectFilesAtDepth(bundleDir, 2),
-    ...collectFilesAtDepth(macReleaseDir, 0),
-    ...collectFilesAtDepth(windowsReleaseDir, 0),
-    ...collectFilesAtDepth(linuxReleaseDir, 0),
-  ];
+  const candidates = getReleaseCandidateDirs().flatMap((dirPath) =>
+    collectFilesAtDepth(dirPath, dirPath === bundleDir ? 2 : 0)
+  );
 
   return [...new Set(candidates)]
     .filter((artifactPath) => isReleaseArtifact(artifactPath))

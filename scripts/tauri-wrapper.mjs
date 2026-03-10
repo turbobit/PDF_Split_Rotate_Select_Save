@@ -229,6 +229,21 @@ function linuxCrossReady(installedTargets) {
 }
 
 function buildPlans(extraArgs, installedTargets) {
+  if (process.platform === "win32") {
+    return [
+      {
+        label: "Windows",
+        targetTriple: null,
+        supported: true,
+        reason: "",
+        args: ["build", ...extraArgs],
+        mode: "native bundle",
+        canAttempt: true,
+        env: process.env,
+      },
+    ];
+  }
+
   const windowsReady = windowsCrossReady(installedTargets);
   const linuxReady = linuxCrossReady(installedTargets);
   const linuxSupported = process.platform === "linux"
@@ -240,15 +255,13 @@ function buildPlans(extraArgs, installedTargets) {
   return [
     {
       label: "Windows",
-      targetTriple: process.platform === "win32" ? null : "x86_64-pc-windows-gnu",
-      supported: process.platform === "win32" || windowsReady.ok,
-      reason: process.platform === "win32" ? "" : windowsReady.reason,
-      args: process.platform === "win32"
-        ? ["build", ...extraArgs]
-        : ["build", "--target", "x86_64-pc-windows-gnu", "--no-bundle", ...extraArgs],
-      mode: process.platform === "win32" ? "native bundle" : "cross binary",
-      canAttempt: process.platform === "win32" || windowsReady.ok,
-      env: process.platform === "win32" ? process.env : windowsCrossEnv(),
+      targetTriple: "x86_64-pc-windows-gnu",
+      supported: windowsReady.ok,
+      reason: windowsReady.reason,
+      args: ["build", "--target", "x86_64-pc-windows-gnu", "--no-bundle", ...extraArgs],
+      mode: "cross binary",
+      canAttempt: windowsReady.ok,
+      env: windowsCrossEnv(),
     },
     {
       label: "macOS",

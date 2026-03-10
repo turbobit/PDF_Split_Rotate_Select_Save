@@ -1326,7 +1326,7 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
-                      code({ className, children }) {
+                      code({ className, children }: { className?: string; children?: React.ReactNode }) {
                         return <AiCodeBlock className={className} children={children} />;
                       },
                     }}

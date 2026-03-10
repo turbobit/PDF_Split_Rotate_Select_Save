@@ -75,6 +75,9 @@ Build desktop app:
 npm run tauri build
 ```
 
+- On Windows, this now runs only the native Windows build.
+- On macOS, it still builds the native macOS bundle first and only attempts extra cross-builds when the toolchain is ready.
+
 Build and publish GitHub Release (create/update by `package.json` version tag):
 
 ```bash
@@ -87,7 +90,7 @@ Release script behavior:
 - pushes tag to `origin` if missing remotely
 - if the same version tag already exists on an older commit, it runs in same-version update mode:
   - collects commit messages from `v<version>..HEAD` for release notes
-  - removes existing release assets and uploads freshly built assets
+  - removes existing release assets and uploads only freshly built artifacts from the current host
 
 ## Project Structure
 
