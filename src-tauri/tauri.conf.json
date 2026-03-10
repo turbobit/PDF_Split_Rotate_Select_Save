@@ -26,7 +26,7 @@
     "active": true,
     "targets": ["msi", "nsis"],
     "windows": {
-      "webviewInstallMode": "embedBootstrapper"
+      "webviewInstallMode": "offlineInstaller"
     },
     "fileAssociations": [
       {
