@@ -1,0 +1,9 @@
+.git
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+coverage
+.DS_Store
+.vite
+.cursor
