@@ -7,6 +7,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, "..");
 const packageJsonPath = join(rootDir, "package.json");
 const bundleDir = join(rootDir, "src-tauri", "target", "release", "bundle");
+const macReleaseDir = join(rootDir, "src-tauri", "target", "release");
+const windowsReleaseDir = join(rootDir, "src-tauri", "target", "x86_64-pc-windows-gnu", "release");
+const linuxReleaseDir = join(rootDir, "src-tauri", "target", "linux-x86_64", "release");
 
 function run(command, options = {}) {
   execSync(command, {
@@ -53,6 +56,51 @@ function collectArtifacts(dirPath, results = []) {
     results.push(fullPath);
   }
   return results;
+}
+
+function collectFilesAtDepth(dirPath, maxDepth = Infinity, currentDepth = 0, results = []) {
+  if (!existsSync(dirPath)) return results;
+  for (const entry of readdirSync(dirPath)) {
+    const fullPath = join(dirPath, entry);
+    const stats = statSync(fullPath);
+    if (stats.isDirectory()) {
+      if (currentDepth < maxDepth) {
+        collectFilesAtDepth(fullPath, maxDepth, currentDepth + 1, results);
+      }
+      continue;
+    }
+    results.push(fullPath);
+  }
+  return results;
+}
+
+function isReleaseArtifact(pathValue) {
+  const lowerPath = pathValue.toLowerCase();
+  return [
+    ".dmg",
+    ".pkg",
+    ".msi",
+    ".exe",
+    ".deb",
+    ".rpm",
+    ".appimage",
+    ".zip",
+    ".tar.gz",
+  ].some((suffix) => lowerPath.endsWith(suffix));
+}
+
+function collectReleaseArtifacts() {
+  const candidates = [
+    ...collectFilesAtDepth(bundleDir, 2),
+    ...collectFilesAtDepth(macReleaseDir, 0),
+    ...collectFilesAtDepth(windowsReleaseDir, 0),
+    ...collectFilesAtDepth(linuxReleaseDir, 0),
+  ];
+
+  return [...new Set(candidates)]
+    .filter((artifactPath) => isReleaseArtifact(artifactPath))
+    .filter((artifactPath) => !artifactPath.endsWith("WebView2Loader.dll"))
+    .sort();
 }
 
 function quotePath(pathValue) {
@@ -239,9 +287,9 @@ const sameVersionUpdate = tagCommit && tagCommit !== headCommit;
 console.log(`[release] Building desktop bundles for ${tag}...`);
 run("npm run tauri build");
 
-const artifacts = collectArtifacts(bundleDir);
+const artifacts = collectReleaseArtifacts();
 if (artifacts.length === 0) {
-  console.error(`[release] No build artifacts found in: ${bundleDir}`);
+  console.error("[release] 배포 가능한 빌드 산출물을 찾지 못했습니다.");
   process.exit(1);
 }
 

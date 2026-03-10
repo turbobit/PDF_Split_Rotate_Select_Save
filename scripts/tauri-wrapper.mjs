@@ -692,9 +692,20 @@ for (const plan of plans) {
     console.error(`[tauri-build] ${plan.label} 빌드가 실패했습니다. 다음 빌드를 계속 진행합니다.`);
   } else {
     cleanedOnce = true;
-    renameBundleArtifacts(plan, appVersion);
-    results.push({ label: plan.label, status: "ok", artifacts: summarizeArtifacts(plan) });
+    const renamedArtifacts = renameBundleArtifacts(plan, appVersion);
+    const artifacts = summarizeArtifacts(plan);
+    results.push({ label: plan.label, status: "ok", artifacts });
     console.log(`[tauri-build] ${plan.label} 빌드가 완료되었습니다.`);
+    const finalExecutables = [...new Set(
+      [...renamedArtifacts, ...artifacts.map((artifactPath) => join(rootDir, artifactPath))]
+        .map((artifactPath) => relativeTargetPath(artifactPath))
+        .filter((artifactPath) => artifactPath.endsWith(".exe") || artifactPath.endsWith(".app") || artifactPath.endsWith(".dmg") || artifactPath.endsWith(".deb") || artifactPath.endsWith(".AppImage"))
+    )];
+    if (finalExecutables.length > 0) {
+      for (const artifactPath of finalExecutables) {
+        console.log(`[tauri-build] ${plan.label} 최종 산출물: ${artifactPath}`);
+      }
+    }
   }
 }
 
