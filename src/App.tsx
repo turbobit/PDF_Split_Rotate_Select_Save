@@ -293,7 +293,7 @@ function App() {
     [activePage, activeSearchResult],
   );
   const statusText = useMemo(() => {
-    if (status.type === "ready") return tr("PDF를 열어 작업을 시작하세요.", "Open a PDF to start.");
+    if (status.type === "ready") return tr("", "");
     if (status.type === "loadingPdf") {
       if (status.phase === "reading") return tr("PDF 파일 읽는 중...", "Reading PDF file...");
       if (status.phase === "opening") return tr("PDF 문서 여는 중...", "Opening PDF document...");
