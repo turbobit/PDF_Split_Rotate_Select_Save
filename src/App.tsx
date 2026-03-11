@@ -2708,29 +2708,22 @@ function App() {
       iframe.style.height = "0";
       iframe.style.border = "0";
 
-      const printStarted = await new Promise<boolean>((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         let cleanedUp = false;
-        let printFallbackId: number | null = null;
-        let didStartPrint = false;
+        let startupTimeoutId: number | null = window.setTimeout(() => {
+          cleanup();
+          reject(new Error(tr("인쇄 창을 열지 못했습니다.", "Failed to open the print frame.")));
+        }, 15000);
+        let cleanupFallbackId: number | null = null;
+
         const cleanup = () => {
           if (cleanedUp) return;
           cleanedUp = true;
-          window.clearTimeout(timeoutId);
-          if (printFallbackId !== null) window.clearTimeout(printFallbackId);
+          if (startupTimeoutId !== null) window.clearTimeout(startupTimeoutId);
+          if (cleanupFallbackId !== null) window.clearTimeout(cleanupFallbackId);
           iframe.remove();
           URL.revokeObjectURL(blobUrl);
         };
-        const finish = () => {
-          if (iframe.contentWindow) {
-            iframe.contentWindow.removeEventListener("afterprint", finish);
-          }
-          cleanup();
-          resolve(didStartPrint);
-        };
-        const timeoutId = window.setTimeout(() => {
-          cleanup();
-          resolve(didStartPrint);
-        }, 15000);
 
         iframe.onload = () => {
           const targetWindow = iframe.contentWindow;
@@ -2739,13 +2732,23 @@ function App() {
             reject(new Error(tr("인쇄 창을 열지 못했습니다.", "Failed to open the print frame.")));
             return;
           }
-          targetWindow.addEventListener("afterprint", finish, { once: true });
+
+          const finishCleanup = () => {
+            targetWindow.removeEventListener("afterprint", finishCleanup);
+            cleanup();
+          };
+
+          targetWindow.addEventListener("afterprint", finishCleanup, { once: true });
           window.setTimeout(() => {
             try {
-              didStartPrint = true;
+              if (startupTimeoutId !== null) {
+                window.clearTimeout(startupTimeoutId);
+                startupTimeoutId = null;
+              }
               targetWindow.focus();
               targetWindow.print();
-              printFallbackId = window.setTimeout(finish, 60000);
+              cleanupFallbackId = window.setTimeout(finishCleanup, 60000);
+              resolve();
             } catch (error) {
               cleanup();
               reject(error);
@@ -2757,14 +2760,12 @@ function App() {
         document.body.appendChild(iframe);
       });
 
-      if (printStarted) {
-        showToast(
-          tr(
-            `선택한 ${selectedPageNumbers.length}페이지 인쇄 창을 열었습니다.`,
-            `Opened the print dialog for ${selectedPageNumbers.length} selected pages.`,
-          ),
-        );
-      }
+      showToast(
+        tr(
+          `선택한 ${selectedPageNumbers.length}페이지 인쇄 창을 열었습니다.`,
+          `Opened the print dialog for ${selectedPageNumbers.length} selected pages.`,
+        ),
+      );
     } catch (error) {
       setErrorText(`${tr("인쇄 실패", "Print failed")}: ${formatError(error)}`);
     } finally {
