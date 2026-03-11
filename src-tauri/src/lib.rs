@@ -418,8 +418,25 @@ fn delete_api_key_from_secret_store(endpoint_id: &str) -> anyhow::Result<()> {
 }
 
 fn resolve_storage_paths() -> anyhow::Result<(PathBuf, PathBuf)> {
-    let home = std::env::var_os("HOME").context("HOME environment variable is not set")?;
-    let config_dir = PathBuf::from(home).join(".config").join(CONFIG_DIR_NAME);
+    let config_root = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA")
+            .or_else(|| std::env::var_os("LOCALAPPDATA"))
+            .map(PathBuf::from)
+            .context("APPDATA or LOCALAPPDATA environment variable is not set")?
+    } else if cfg!(target_os = "macos") {
+        let home = std::env::var_os("HOME").context("HOME environment variable is not set")?;
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+            })
+            .context("XDG_CONFIG_HOME or HOME environment variable is not set")?
+    };
+    let config_dir = config_root.join(CONFIG_DIR_NAME);
     std::fs::create_dir_all(&config_dir).with_context(|| {
         format!(
             "failed to create config directory: {}",
@@ -2928,7 +2945,9 @@ pub fn run() {
     let (config_dir, database_path) =
         resolve_storage_paths().expect("failed to prepare config directory");
     initialize_secret_store();
-    let _ = open_database(&database_path);
+    if let Err(error) = open_database(&database_path) {
+        eprintln!("failed to initialize database: {error:#}");
+    }
 
     tauri::Builder::default()
         .manage(PendingPdfPaths::default())

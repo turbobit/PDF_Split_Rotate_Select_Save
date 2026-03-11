@@ -13,7 +13,7 @@
     "windows": [
       {
         "title": "PDF 자르고 추기하고 돌려고 선택하여 저장하기",
-        "visible": false,
+        "visible": true,
         "width": 800,
         "height": 600
       }
