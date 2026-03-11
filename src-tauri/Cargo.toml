@@ -26,6 +26,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 keyring = "4.0.0-rc.3"
 keyring-core = "=0.7.2"
+lopdf = "0.39.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.38.0", features = ["bundled-full"] }
 sha2 = "0.10"

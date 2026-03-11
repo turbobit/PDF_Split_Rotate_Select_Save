@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use keyring_core::{Entry, Error as KeyringError};
+use lopdf::encryption::{EncryptionState, EncryptionVersion, Permissions};
+use lopdf::Document as LoDocument;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -210,6 +212,57 @@ struct CompactChatHistoryRequest {
     messages: Vec<StoredChatMessage>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtectPdfRequest {
+    pdf_bytes: Vec<u8>,
+    output_path: String,
+    password: String,
+    owner_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnprotectPdfRequest {
+    input_path: String,
+    output_path: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectPdfSecurityRequest {
+    pdf_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectPdfSecurityResponse {
+    is_encrypted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfTextEditRequest {
+    page_number: u32,
+    search_text: String,
+    replacement_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyPdfTextEditsRequest {
+    pdf_bytes: Vec<u8>,
+    edits: Vec<PdfTextEditRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyPdfTextEditsResponse {
+    pdf_bytes: Vec<u8>,
+    applied_edits: usize,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompactChatHistoryResponse {
@@ -279,6 +332,22 @@ fn collect_pdf_paths(args: impl IntoIterator<Item = OsString>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn ensure_pdf_file_id(document: &mut LoDocument, pdf_bytes: &[u8]) {
+    if document.trailer.has(b"ID") {
+        return;
+    }
+
+    let digest = Sha256::digest(pdf_bytes);
+    let file_id = digest[..16].to_vec();
+    document.trailer.set(
+        b"ID",
+        lopdf::Object::Array(vec![
+            lopdf::Object::String(file_id.clone(), lopdf::StringFormat::Hexadecimal),
+            lopdf::Object::String(file_id, lopdf::StringFormat::Hexadecimal),
+        ]),
+    );
 }
 
 fn enqueue_pdf_paths(state: &State<'_, PendingPdfPaths>, paths: Vec<String>) {
@@ -2593,6 +2662,127 @@ async fn compact_chat_history_inner(
     })
 }
 
+fn protect_pdf_inner(request: ProtectPdfRequest) -> anyhow::Result<()> {
+    let password = request.password.trim();
+    if password.is_empty() {
+        return Err(anyhow!("password is required"));
+    }
+    if request.pdf_bytes.is_empty() {
+        return Err(anyhow!("pdf bytes are empty"));
+    }
+
+    let owner_password = request
+        .owner_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(password);
+
+    let mut document = LoDocument::load_mem(&request.pdf_bytes)
+        .context("failed to parse PDF bytes for encryption")?;
+    if document.is_encrypted() {
+        return Err(anyhow!("document is already encrypted"));
+    }
+    ensure_pdf_file_id(&mut document, &request.pdf_bytes);
+
+    let version = EncryptionVersion::V2 {
+        document: &document,
+        owner_password,
+        user_password: password,
+        key_length: 128,
+        permissions: Permissions::all(),
+    };
+    let state = EncryptionState::try_from(version)
+        .context("failed to build PDF encryption state")?;
+    document
+        .encrypt(&state)
+        .context("failed to encrypt PDF document")?;
+    document
+        .save(&request.output_path)
+        .with_context(|| format!("failed to save encrypted PDF: {}", request.output_path))?;
+    Ok(())
+}
+
+fn unprotect_pdf_inner(request: UnprotectPdfRequest) -> anyhow::Result<()> {
+    let password = request.password.trim();
+    if password.is_empty() {
+        return Err(anyhow!("password is required"));
+    }
+
+    let mut document = LoDocument::load(&request.input_path)
+        .or_else(|_| LoDocument::load_with_password(&request.input_path, password))
+        .with_context(|| format!("failed to open PDF: {}", request.input_path))?;
+
+    if document.is_encrypted() {
+        document
+            .decrypt(password)
+            .context("failed to decrypt PDF document")?;
+    }
+
+    document
+        .save(&request.output_path)
+        .with_context(|| format!("failed to save decrypted PDF: {}", request.output_path))?;
+    Ok(())
+}
+
+fn inspect_pdf_security_inner(
+    request: InspectPdfSecurityRequest,
+) -> anyhow::Result<InspectPdfSecurityResponse> {
+    if request.pdf_bytes.is_empty() {
+        return Err(anyhow!("pdf bytes are empty"));
+    }
+    let document = LoDocument::load_mem(&request.pdf_bytes)
+        .context("failed to parse PDF bytes for security inspection")?;
+    Ok(InspectPdfSecurityResponse {
+        is_encrypted: document.is_encrypted(),
+    })
+}
+
+fn apply_pdf_text_edits_inner(
+    request: ApplyPdfTextEditsRequest,
+) -> anyhow::Result<ApplyPdfTextEditsResponse> {
+    if request.pdf_bytes.is_empty() {
+        return Err(anyhow!("pdf bytes are empty"));
+    }
+
+    let mut document = LoDocument::load_mem(&request.pdf_bytes)
+        .context("failed to parse PDF bytes for text editing")?;
+    let mut applied_edits = 0usize;
+
+    for edit in request.edits {
+        let search_text = edit.search_text.trim();
+        if search_text.is_empty() {
+            continue;
+        }
+        let replacements = document
+            .replace_partial_text(
+                edit.page_number,
+                search_text,
+                edit.replacement_text.as_str(),
+                Some(" "),
+            )
+            .with_context(|| {
+                format!(
+                    "failed to replace text on page {} for '{}'",
+                    edit.page_number, search_text
+                )
+            })?;
+        if replacements > 0 {
+            applied_edits += 1;
+        }
+    }
+
+    let mut buffer = Vec::new();
+    document
+        .save_to(&mut buffer)
+        .context("failed to serialize edited PDF")?;
+
+    Ok(ApplyPdfTextEditsResponse {
+        pdf_bytes: buffer,
+        applied_edits,
+    })
+}
+
 #[tauri::command]
 fn take_next_pending_pdf_path(state: State<'_, PendingPdfPaths>) -> Option<String> {
     if let Ok(mut queue) = state.queue.lock() {
@@ -2709,6 +2899,30 @@ async fn get_endpoint_model_catalog(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn protect_pdf(request: ProtectPdfRequest) -> Result<(), String> {
+    protect_pdf_inner(request).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn unprotect_pdf(request: UnprotectPdfRequest) -> Result<(), String> {
+    unprotect_pdf_inner(request).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn inspect_pdf_security(
+    request: InspectPdfSecurityRequest,
+) -> Result<InspectPdfSecurityResponse, String> {
+    inspect_pdf_security_inner(request).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn apply_pdf_text_edits(
+    request: ApplyPdfTextEditsRequest,
+) -> Result<ApplyPdfTextEditsResponse, String> {
+    apply_pdf_text_edits_inner(request).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (config_dir, database_path) =
@@ -2739,7 +2953,11 @@ pub fn run() {
             chat_with_pdf,
             compact_chat_history,
             test_ai_endpoint,
-            get_endpoint_model_catalog
+            get_endpoint_model_catalog,
+            protect_pdf,
+            unprotect_pdf,
+            inspect_pdf_security,
+            apply_pdf_text_edits
         ])
         .setup(|app| {
             let startup_paths = collect_pdf_paths(std::env::args_os().skip(1));

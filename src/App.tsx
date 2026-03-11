@@ -1,21 +1,48 @@
-import { join } from "@tauri-apps/api/path";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { join } from "@tauri-apps/api/path";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, message, open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
   type PDFDocumentProxy,
+  type PDFPageProxy,
   type RenderTask,
 } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { Suspense, lazy, memo, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AddPdfModal from "./components/AddPdfModal";
 import MergePdfModal from "./components/MergePdfModal";
 import PdfInfoModal, { type PdfInfoField } from "./components/PdfInfoModal";
+import PdfSecurityModal from "./components/PdfSecurityModal";
+import {
+  buildPreviewCacheKey,
+  imageMimeTypeFromPath,
+  isEditableTarget,
+  isImageFilePath,
+  isPdfFilePath,
+  isPdfJsDocumentTeardownError,
+  measureImage,
+  normalizePdfRect,
+  normalizeSearchQuery,
+  PAGE_LOAD_BATCH_DELAY_MS,
+  PAGE_LOAD_BATCH_SIZE,
+  PdfPageOverlay,
+  PdfRect,
+  PdfRedactionOverlay,
+  PdfSecurityMode,
+  PdfTextOverlay,
+  PreviewTextLayer,
+  readStoredZoom,
+  rectHasArea,
+  SHORTCUT_LABELS,
+  ToolbarIcon,
+  withShortcutHint,
+} from "./app/app-view-helpers";
 import {
   APP_VERSION,
   IMAGE_EXPORT_SCALE,
@@ -70,254 +97,14 @@ GlobalWorkerOptions.workerSrc = workerSrc;
 
 const AiChatPanel = lazy(() => import("./components/AiChatPanel"));
 
-type ToolbarIconName =
-  | "open"
-  | "add"
-  | "merge"
-  | "close"
-  | "print"
-  | "apply"
-  | "selectAll"
-  | "clear"
-  | "rangeAdd"
-  | "rangeRemove"
-  | "save"
-  | "singlePage"
-  | "doublePage"
-  | "search";
-
-function ToolbarIcon({ name }: { name: ToolbarIconName }) {
-  const commonProps = {
-    className: "btn-icon",
-    viewBox: "0 0 16 16",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.4,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    "aria-hidden": true,
-  };
-
-  switch (name) {
-    case "open":
-      return (
-        <svg {...commonProps}>
-          <path d="M2.5 5.5h3l1.2-2h2.7l1.2 2h3.1" />
-          <path d="M2 6.5h12l-1 6.5H3z" />
-        </svg>
-      );
-    case "add":
-      return (
-        <svg {...commonProps}>
-          <path d="M3 4.5h7l3 3V13H3z" />
-          <path d="M10 4.5V8h3" />
-          <path d="M8 9v3" />
-          <path d="M6.5 10.5h3" />
-        </svg>
-      );
-    case "merge":
-      return (
-        <svg {...commonProps}>
-          <path d="M3 4.5h3.5L8 6l1.5-1.5H13" />
-          <path d="M3 11.5h3.5L8 10l1.5 1.5H13" />
-          <path d="M8 6v4" />
-        </svg>
-      );
-    case "close":
-      return (
-        <svg {...commonProps}>
-          <path d="M3.5 3.5l9 9" />
-          <path d="M12.5 3.5l-9 9" />
-        </svg>
-      );
-    case "print":
-      return (
-        <svg {...commonProps}>
-          <path d="M4.5 6V3.5h7V6" />
-          <path d="M4 11.5H3a1.5 1.5 0 0 1-1.5-1.5V8A1.5 1.5 0 0 1 3 6.5h10A1.5 1.5 0 0 1 14.5 8v2A1.5 1.5 0 0 1 13 11.5h-1" />
-          <path d="M4.5 9.5h7V13h-7z" />
-        </svg>
-      );
-    case "apply":
-      return (
-        <svg {...commonProps}>
-          <path d="M3 8l3 3 7-7" />
-        </svg>
-      );
-    case "selectAll":
-      return (
-        <svg {...commonProps}>
-          <path d="M2.5 3.5h4v4h-4z" />
-          <path d="M9.5 3.5h4v4h-4z" />
-          <path d="M2.5 10.5h4v2h-4z" />
-          <path d="M10 11.5l1.5 1.5 2.5-3" />
-        </svg>
-      );
-    case "clear":
-      return (
-        <svg {...commonProps}>
-          <path d="M3 4.5h10" />
-          <path d="M5 4.5V3h6v1.5" />
-          <path d="M4.5 4.5l.8 8h5.4l.8-8" />
-          <path d="M6.5 6.5v4" />
-          <path d="M9.5 6.5v4" />
-        </svg>
-      );
-    case "rangeAdd":
-      return (
-        <svg {...commonProps}>
-          <path d="M2.5 5.5h5" />
-          <path d="M2.5 10.5h5" />
-          <path d="M11.5 5.5v5" />
-          <path d="M9 8h5" />
-        </svg>
-      );
-    case "rangeRemove":
-      return (
-        <svg {...commonProps}>
-          <path d="M2.5 5.5h5" />
-          <path d="M2.5 10.5h5" />
-          <path d="M9 8h5" />
-        </svg>
-      );
-    case "save":
-      return (
-        <svg {...commonProps}>
-          <path d="M3 3.5h8l2 2V13H3z" />
-          <path d="M5 3.5v3h5v-3" />
-          <path d="M5 12v-3.5h6V12" />
-        </svg>
-      );
-    case "singlePage":
-      return (
-        <svg {...commonProps}>
-          <rect x="4" y="2.5" width="8" height="11" rx="1.2" />
-          <path d="M6 5h4" />
-          <path d="M6 7.5h4" />
-        </svg>
-      );
-    case "doublePage":
-      return (
-        <svg {...commonProps}>
-          <rect x="1.8" y="3" width="5.5" height="10" rx="0.9" />
-          <rect x="8.7" y="3" width="5.5" height="10" rx="0.9" />
-        </svg>
-      );
-    case "search":
-      return (
-        <svg {...commonProps}>
-          <circle cx="7" cy="7" r="3.5" />
-          <path d="M10 10l3 3" />
-        </svg>
-      );
-    default:
-      return null;
-  }
-}
-
-const SHORTCUT_LABELS = {
-  openPdf: "Ctrl+O",
-  addPdf: "Ctrl+Shift+O",
-  mergePdfs: "Ctrl+Shift+M",
-  closePdf: "Ctrl+W",
-  printSelection: "Ctrl+P",
-  saveSelection: "Ctrl+S",
-  applyQuickSelection: "Enter",
-  selectAllPages: "Ctrl+A",
-  clearSelection: "Esc",
-  addRange: "Ctrl+Shift+=",
-  removeRange: "Ctrl+-",
-  previousPage: "PageUp",
-  nextPage: "PageDown",
-  rotateLeft: "Ctrl+[",
-  rotateRight: "Ctrl+]",
-  findInDocument: "Ctrl+F",
-} as const;
-
-function withShortcutHint(label: string, shortcut?: string): string {
-  return shortcut ? `${label} (${shortcut})` : label;
-}
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  const tag = target.tagName;
-  return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-}
-
-function readStoredZoom(): number {
-  const raw = window.localStorage.getItem("app.previewZoom");
-  const parsed = raw ? Number.parseInt(raw, 10) : 100;
-  return clamp(Number.isFinite(parsed) ? parsed : 100, ZOOM_MIN, ZOOM_MAX);
-}
-
-const PAGE_LOAD_BATCH_SIZE = 24;
-const PAGE_LOAD_BATCH_DELAY_MS = 16;
-
-function normalizeSearchQuery(value: string): string {
-  return normalizeOutlineTitle(value).toLowerCase();
-}
-
-function buildPreviewCacheKey(pageNumber: number, rotation: number, scale: number): string {
-  return `${pageNumber}:${rotation}:${Math.round(scale * 1000)}`;
-}
-
-type PreviewTextLayerProps = {
-  spans: PreviewTextSpan[];
-  isAreaSelectMode: boolean;
-  onMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
-  activeSpanIndex: number | null;
-  matchedSpanIndexes: Set<number>;
-  normalizedSelectionRect: { left: number; top: number; right: number; bottom: number } | null;
-  layerRef: RefObject<HTMLDivElement | null>;
+type InspectPdfSecurityResponse = {
+  isEncrypted: boolean;
 };
 
-const PreviewTextLayer = memo(function PreviewTextLayer({
-  spans,
-  isAreaSelectMode,
-  onMouseDown,
-  activeSpanIndex,
-  matchedSpanIndexes,
-  normalizedSelectionRect,
-  layerRef,
-}: PreviewTextLayerProps) {
-  return (
-    <div
-      className={`preview-text-layer ${isAreaSelectMode ? "area-mode" : ""}`}
-      ref={layerRef}
-      onMouseDown={onMouseDown}
-    >
-      {spans.map((span, spanIndex) => (
-        <span
-          key={span.id}
-          className={`preview-text-span ${matchedSpanIndexes.has(spanIndex) ? "search-hit" : ""} ${activeSpanIndex === spanIndex ? "search-hit-active" : ""}`}
-          data-text={span.text}
-          style={{
-            left: `${span.left}px`,
-            top: `${span.top}px`,
-            width: `${span.width}px`,
-            height: `${span.height}px`,
-            fontSize: `${span.fontSize}px`,
-            fontFamily: span.fontFamily,
-            transform: `rotate(${span.angleDeg}deg)`,
-          }}
-        >
-          {span.text}
-        </span>
-      ))}
-      {normalizedSelectionRect ? (
-        <div
-          className="preview-selection-rect"
-          style={{
-            left: `${normalizedSelectionRect.left}px`,
-            top: `${normalizedSelectionRect.top}px`,
-            width: `${Math.max(0, normalizedSelectionRect.right - normalizedSelectionRect.left)}px`,
-            height: `${Math.max(0, normalizedSelectionRect.bottom - normalizedSelectionRect.top)}px`,
-          }}
-        />
-      ) : null}
-    </div>
-  );
-});
+type ApplyPdfTextEditsResponse = {
+  pdfBytes: number[];
+  appliedEdits: number;
+};
 
 function App() {
   const [locale, setLocale] = useState<Locale>(detectLocale);
@@ -402,9 +189,20 @@ function App() {
   const [draggingOutlineId, setDraggingOutlineId] = useState<string | null>(null);
   const [draggingOutlineIndex, setDraggingOutlineIndex] = useState<number | null>(null);
   const [outlineDropTargetId, setOutlineDropTargetId] = useState<string | null>(null);
+  const [pageOverlays, setPageOverlays] = useState<PdfPageOverlay[]>([]);
+  const [selectedPreviewPdfRect, setSelectedPreviewPdfRect] = useState<PdfRect | null>(null);
+  const [isFileDragActive, setIsFileDragActive] = useState(false);
+  const [isCurrentPdfEncrypted, setIsCurrentPdfEncrypted] = useState(false);
+  const [securityModalMode, setSecurityModalMode] = useState<PdfSecurityMode | null>(null);
+  const [securityPassword, setSecurityPassword] = useState("");
+  const [securityConfirmPassword, setSecurityConfirmPassword] = useState("");
+  const [securityModalError, setSecurityModalError] = useState<string | null>(null);
+  const [pendingProtectedPdfPath, setPendingProtectedPdfPath] = useState<string | null>(null);
 
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const previewInteractionRef = useRef<HTMLDivElement | null>(null);
+  const previewPrimarySlotRef = useRef<HTMLDivElement | null>(null);
+  const previewSecondarySlotRef = useRef<HTMLDivElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasSecondaryRef = useRef<HTMLCanvasElement | null>(null);
   const previewTextLayerRef = useRef<HTMLDivElement | null>(null);
@@ -435,6 +233,12 @@ function App() {
   const pageTextSearchCacheRef = useRef<Map<number, string[]>>(new Map());
   const searchTokenRef = useRef(0);
   const pendingAiCitationJumpRef = useRef<{ pageNumber: number; query: string } | null>(null);
+  const pageOverlaysRef = useRef<PdfPageOverlay[]>([]);
+  const primaryPreviewViewportRef = useRef<ReturnType<PDFPageProxy["getViewport"]> | null>(null);
+  const secondaryPreviewViewportRef = useRef<ReturnType<PDFPageProxy["getViewport"]> | null>(null);
+  const secondaryPreviewPageNumberRef = useRef<number | null>(null);
+  const previewRenderGenerationRef = useRef(0);
+  const hasPrefetchedPdfInfoRef = useRef(false);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -477,6 +281,18 @@ function App() {
   const activeSearchResult = useMemo(
     () => (searchResults.length > 0 ? searchResults[clamp(activeSearchResultIndex, 0, searchResults.length - 1)] : null),
     [activeSearchResultIndex, searchResults],
+  );
+  const secondaryPreviewPageNumber = useMemo(
+    () => (previewSpreadMode && activePage < pageCount ? activePage + 1 : null),
+    [activePage, pageCount, previewSpreadMode],
+  );
+  const activePageOverlays = useMemo(
+    () => pageOverlays.filter((overlay) => overlay.pageNumber === activePage),
+    [activePage, pageOverlays],
+  );
+  const secondaryPageOverlays = useMemo(
+    () => (secondaryPreviewPageNumber ? pageOverlays.filter((overlay) => overlay.pageNumber === secondaryPreviewPageNumber) : []),
+    [pageOverlays, secondaryPreviewPageNumber],
   );
   const activeSearchSpanIndex = useMemo(
     () => (activeSearchResult?.pageNumber === activePage ? activeSearchResult.spanIndex : null),
@@ -619,6 +435,230 @@ function App() {
     });
   }, []);
 
+  useEffect(() => {
+    pageOverlaysRef.current = pageOverlays;
+  }, [pageOverlays]);
+
+  useEffect(() => {
+    // Tauri 환경에서만 창 표시
+    if (typeof window !== "undefined" && window.__TAURI__) {
+      void getCurrentWindow().show().catch(() => {
+        // Ignore if the window is already visible.
+      });
+    }
+  }, []);
+
+  const revokeOverlayUrls = useCallback((overlays: PdfPageOverlay[]) => {
+    overlays.forEach((overlay) => {
+      if (overlay.kind === "image") URL.revokeObjectURL(overlay.previewUrl);
+    });
+  }, []);
+
+  const inspectCurrentPdfSecurity = useCallback(async (bytes: Uint8Array) => {
+    try {
+      const result = await invoke<InspectPdfSecurityResponse>("inspect_pdf_security", {
+        request: {
+          pdfBytes: Array.from(bytes),
+        },
+      });
+      setIsCurrentPdfEncrypted(result.isEncrypted);
+    } catch {
+      setIsCurrentPdfEncrypted(false);
+    }
+  }, []);
+
+  const closePdfSecurityModal = useCallback(() => {
+    if (isSaving) return;
+    setSecurityModalMode(null);
+    setSecurityPassword("");
+    setSecurityConfirmPassword("");
+    setSecurityModalError(null);
+    setPendingProtectedPdfPath(null);
+  }, [isSaving]);
+
+  const openProtectPdfModal = useCallback(() => {
+    setSecurityModalError(null);
+    setSecurityPassword("");
+    setSecurityConfirmPassword("");
+    setSecurityModalMode("protect");
+  }, []);
+
+  const openUnprotectPdfModal = useCallback(() => {
+    setSecurityModalError(null);
+    setSecurityPassword("");
+    setSecurityConfirmPassword("");
+    setSecurityModalMode("unprotect");
+  }, []);
+
+  const isPdfPasswordRequiredError = useCallback((error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    const messageText = error.message.toLowerCase();
+    const errorName = error.name.toLowerCase();
+    return (
+      errorName.includes("passwordexception")
+      || messageText.includes("no password given")
+      || messageText.includes("password required")
+      || messageText.includes("incorrect password")
+    );
+  }, []);
+
+  const toCssPointFromDragDropPosition = useCallback((position: { x: number; y: number }) => {
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: position.x / dpr,
+      y: position.y / dpr,
+    };
+  }, []);
+
+  const convertViewportRectToPdfRect = useCallback((
+    viewport: ReturnType<PDFPageProxy["getViewport"]> | null,
+    left: number,
+    top: number,
+    right: number,
+    bottom: number,
+  ): PdfRect | null => {
+    if (!viewport) return null;
+    const [x1, y1] = viewport.convertToPdfPoint(left, top);
+    const [x2, y2] = viewport.convertToPdfPoint(right, bottom);
+    return normalizePdfRect({ x1, y1, x2, y2 });
+  }, []);
+
+  const convertPdfRectToViewportRect = useCallback((
+    viewport: ReturnType<PDFPageProxy["getViewport"]> | null,
+    rect: PdfRect,
+  ) => {
+    if (!viewport) return null;
+    const [left1, top1] = viewport.convertToViewportPoint(rect.x1, rect.y1);
+    const [left2, top2] = viewport.convertToViewportPoint(rect.x2, rect.y2);
+    const left = Math.min(left1, left2);
+    const right = Math.max(left1, left2);
+    const top = Math.min(top1, top2);
+    const bottom = Math.max(top1, top2);
+    return {
+      left,
+      top,
+      width: right - left,
+      height: bottom - top,
+    };
+  }, []);
+
+  const getPreviewOverlayStyle = useCallback((
+    overlay: PdfPageOverlay,
+    viewport: ReturnType<PDFPageProxy["getViewport"]> | null,
+  ) => {
+    const rect = convertPdfRectToViewportRect(viewport, overlay.rect);
+    if (!rect) return null;
+    return {
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${Math.max(1, rect.width)}px`,
+      height: `${Math.max(1, rect.height)}px`,
+    };
+  }, [convertPdfRectToViewportRect]);
+
+  const renderPreviewOverlayNodes = useCallback((
+    overlays: PdfPageOverlay[],
+    viewport: ReturnType<PDFPageProxy["getViewport"]> | null,
+  ) => overlays.map((overlay) => {
+    const style = getPreviewOverlayStyle(overlay, viewport);
+    if (!style) return null;
+    if (overlay.kind === "image") {
+      return (
+        <img
+          key={overlay.id}
+          className="preview-image-overlay"
+          src={overlay.previewUrl}
+          alt={overlay.sourceName}
+          style={style}
+        />
+      );
+    }
+    if (overlay.kind === "text") {
+      return (
+        <div key={overlay.id} className="preview-text-edit-overlay" style={style}>
+          <span>{overlay.text}</span>
+        </div>
+      );
+    }
+    return <div key={overlay.id} className="preview-redact-overlay" style={style} />;
+  }), [getPreviewOverlayStyle]);
+
+  const removeLastOverlayOnActivePage = useCallback(() => {
+    setPageOverlays((prev) => {
+      const targetIndex = [...prev].reverse().findIndex((overlay) => overlay.pageNumber === activePage);
+      if (targetIndex < 0) return prev;
+      const actualIndex = prev.length - targetIndex - 1;
+      const removed = prev[actualIndex];
+      if (removed?.kind === "image") URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter((_, index) => index !== actualIndex);
+    });
+  }, [activePage]);
+
+  const clearActivePageOverlays = useCallback(() => {
+    setPageOverlays((prev) => {
+      const removed = prev.filter((overlay) => overlay.pageNumber === activePage);
+      revokeOverlayUrls(removed);
+      return prev.filter((overlay) => overlay.pageNumber !== activePage);
+    });
+  }, [activePage, revokeOverlayUrls]);
+
+  const applySelectedTextRedaction = useCallback(async () => {
+    const searchText = normalizeOutlineTitle(selectedPreviewText);
+    if (!rectHasArea(selectedPreviewPdfRect) || searchText.length === 0) {
+      await message(tr("본문에서 텍스트를 먼저 선택해주세요.", "Select text in the page body first."), {
+        title: tr("안내", "Notice"),
+      });
+      return;
+    }
+    setPageOverlays((prev) => [
+      ...prev,
+      {
+        id: createOutlineEntryId(),
+        kind: "redact",
+        pageNumber: activePage,
+        rect: selectedPreviewPdfRect,
+        searchText,
+      },
+    ]);
+    showToast(tr("선택한 텍스트를 가림 처리했습니다.", "Redacted the selected text."));
+    focusPreviewArea();
+  }, [activePage, focusPreviewArea, selectedPreviewPdfRect, selectedPreviewText, showToast, tr]);
+
+  const applySelectedTextReplacement = useCallback(async () => {
+    const searchText = normalizeOutlineTitle(selectedPreviewText);
+    if (!rectHasArea(selectedPreviewPdfRect) || searchText.length === 0) {
+      await message(tr("본문에서 텍스트를 먼저 선택해주세요.", "Select text in the page body first."), {
+        title: tr("안내", "Notice"),
+      });
+      return;
+    }
+    const replacement = window.prompt(
+      tr("바꿀 텍스트를 입력하세요.", "Enter replacement text."),
+      normalizeOutlineTitle(selectedPreviewText),
+    );
+    const nextText = normalizeOutlineTitle(replacement ?? "");
+    if (nextText.length === 0) return;
+    const fontSize = clamp(
+      Math.round(Math.max(10, Math.abs(selectedPreviewPdfRect.y2 - selectedPreviewPdfRect.y1) * 0.82)),
+      10,
+      28,
+    );
+    setPageOverlays((prev) => [
+      ...prev,
+      {
+        id: createOutlineEntryId(),
+        kind: "text",
+        pageNumber: activePage,
+        rect: selectedPreviewPdfRect,
+        searchText,
+        text: nextText,
+        fontSize,
+      },
+    ]);
+    showToast(tr("선택한 텍스트를 덮어썼습니다.", "Replaced the selected text."));
+    focusPreviewArea();
+  }, [activePage, focusPreviewArea, selectedPreviewPdfRect, selectedPreviewText, showToast, tr]);
+
   const buildAiCitationSearchQuery = useCallback((text: string) => {
     const tokens = normalizeSearchQuery(text)
       .split(" ")
@@ -641,6 +681,7 @@ function App() {
     setIsAreaSelectMode(false);
     setIsAreaSelecting(false);
     setPreviewSelectionRect(null);
+    setSelectedPreviewPdfRect(null);
   }, [previewSpreadMode]);
 
   const clearThumbnailPipeline = useCallback(() => {
@@ -683,11 +724,16 @@ function App() {
     setPreviewSecondaryPageSize({ width: 0, height: 0 });
     setPreviewTextSpans([]);
     setSelectedPreviewText("");
+    setSelectedPreviewPdfRect(null);
     setPreviewSelectionRect(null);
     setIsAreaSelecting(false);
+    primaryPreviewViewportRef.current = null;
+    secondaryPreviewViewportRef.current = null;
+    secondaryPreviewPageNumberRef.current = null;
   }, []);
 
   const replacePdfDocument = useCallback(async (nextDoc: PDFDocumentProxy | null) => {
+    previewRenderGenerationRef.current += 1;
     if (pdfDocRef.current) await pdfDocRef.current.destroy();
     pdfDocRef.current = nextDoc;
     setPdfDoc(nextDoc);
@@ -724,9 +770,10 @@ function App() {
   useEffect(() => () => {
     cancelProgressivePageLoad();
     clearThumbnailPipeline();
+    revokeOverlayUrls(pageOverlaysRef.current);
     if (pdfDocRef.current) void pdfDocRef.current.destroy();
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
-  }, [cancelProgressivePageLoad, clearThumbnailPipeline]);
+  }, [cancelProgressivePageLoad, clearThumbnailPipeline, revokeOverlayUrls]);
 
   const hydratePageListInBackground = useCallback((totalPages: number) => {
     if (totalPages <= 1) return;
@@ -1029,6 +1076,7 @@ function App() {
     setIsAreaSelecting(true);
     setPreviewSelectionRect({ x1: x, y1: y, x2: x, y2: y });
     setSelectedPreviewText("");
+    setSelectedPreviewPdfRect(null);
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) selection.removeAllRanges();
     event.preventDefault();
@@ -1066,7 +1114,20 @@ function App() {
       }
       setPreviewSelectionRect(null);
       const joined = normalizeOutlineTitle(selected.join(" "));
-      if (joined.length > 0) setSelectedPreviewText(joined);
+      if (joined.length > 0) {
+        setSelectedPreviewText(joined);
+        setSelectedPreviewPdfRect(
+          convertViewportRectToPdfRect(
+            primaryPreviewViewportRef.current,
+            normalized.left,
+            normalized.top,
+            normalized.right,
+            normalized.bottom,
+          ),
+        );
+      } else {
+        setSelectedPreviewPdfRect(null);
+      }
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", stop);
@@ -1074,7 +1135,7 @@ function App() {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", stop);
     };
-  }, [isAreaSelecting]);
+  }, [convertViewportRectToPdfRect, isAreaSelecting]);
 
   useEffect(() => {
     const onSelectionChange = () => {
@@ -1084,6 +1145,7 @@ function App() {
       if (!selection || !layer) return;
       if (selection.isCollapsed) {
         setSelectedPreviewText("");
+        setSelectedPreviewPdfRect(null);
         return;
       }
       const anchor = selection.anchorNode;
@@ -1091,10 +1153,26 @@ function App() {
       const isInsideLayer = (node: Node | null) => !!node && (node === layer || layer.contains(node));
       if (!isInsideLayer(anchor) || !isInsideLayer(focus)) return;
       setSelectedPreviewText(normalizeOutlineTitle(selection.toString()));
+      if (selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        const rects = Array.from(range.getClientRects());
+        const layerRect = layer.getBoundingClientRect();
+        if (rects.length > 0) {
+          const left = Math.min(...rects.map((rect) => rect.left)) - layerRect.left;
+          const top = Math.min(...rects.map((rect) => rect.top)) - layerRect.top;
+          const right = Math.max(...rects.map((rect) => rect.right)) - layerRect.left;
+          const bottom = Math.max(...rects.map((rect) => rect.bottom)) - layerRect.top;
+          setSelectedPreviewPdfRect(
+            convertViewportRectToPdfRect(primaryPreviewViewportRef.current, left, top, right, bottom),
+          );
+        } else {
+          setSelectedPreviewPdfRect(null);
+        }
+      }
     };
     document.addEventListener("selectionchange", onSelectionChange);
     return () => document.removeEventListener("selectionchange", onSelectionChange);
-  }, [isAreaSelecting, isAreaSelectMode]);
+  }, [convertViewportRectToPdfRect, isAreaSelecting, isAreaSelectMode]);
 
   const isPageProtected = useCallback((pageNumber: number) => {
     return pageNumber === activePageRef.current || visiblePagesRef.current.has(pageNumber);
@@ -1249,13 +1327,14 @@ function App() {
     let secondaryRenderTask: RenderTask | null = null;
     let textLayerTimer: number | null = null;
     let cancelled = false;
+    const renderGeneration = previewRenderGenerationRef.current;
     const run = async () => {
       try {
         const page = await pdfDoc.getPage(activePage);
-        if (cancelled) return;
+        if (cancelled || renderGeneration !== previewRenderGenerationRef.current) return;
         const secondaryPageNumber = previewSpreadMode && activePage < pageCount ? activePage + 1 : null;
         const secondaryPage = secondaryPageNumber ? await pdfDoc.getPage(secondaryPageNumber) : null;
-        if (cancelled) return;
+        if (cancelled || renderGeneration !== previewRenderGenerationRef.current) return;
         const rotation = pageRotationsRef.current[activePage] ?? 0;
         const secondaryRotation = secondaryPageNumber ? (pageRotationsRef.current[secondaryPageNumber] ?? 0) : 0;
         const base = page.getViewport({ scale: 1, rotation });
@@ -1271,6 +1350,9 @@ function App() {
           : Math.max(0.1, fitScale * (previewZoom / 100));
         const viewport = page.getViewport({ scale: cssScale, rotation });
         const secondaryViewport = secondaryPage ? secondaryPage.getViewport({ scale: cssScale, rotation: secondaryRotation }) : null;
+        primaryPreviewViewportRef.current = viewport;
+        secondaryPreviewViewportRef.current = secondaryViewport;
+        secondaryPreviewPageNumberRef.current = secondaryPageNumber;
         const dpr = window.devicePixelRatio || 1;
         const cacheKey = buildPreviewCacheKey(activePage, rotation, cssScale);
         const cachedPrimary = previewRenderCacheRef.current.get(cacheKey);
@@ -1341,14 +1423,19 @@ function App() {
         textLayerTimer = window.setTimeout(async () => {
           try {
             const textContent = await page.getTextContent();
-            if (cancelled) return;
+            if (cancelled || renderGeneration !== previewRenderGenerationRef.current) return;
 
             setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale, textContent.styles as Record<string, { fontFamily?: string }>));
           } catch (error) {
             const known = error as { name?: string; message?: string };
             console.error("PDF.js 텍스트 레이어 로딩 에러:", error);
 
-            if (known.name !== "RenderingCancelledException" && !cancelled) {
+            if (
+              known.name !== "RenderingCancelledException"
+              && !cancelled
+              && renderGeneration === previewRenderGenerationRef.current
+              && !isPdfJsDocumentTeardownError(error)
+            ) {
               setErrorText(`${tr("본문 텍스트 레이어 로딩 실패", "Failed to load text layer")}: ${formatError(error)}`);
             }
           }
@@ -1369,7 +1456,12 @@ function App() {
         );
       } catch (error) {
         const known = error as { name?: string };
-        if (known.name !== "RenderingCancelledException" && !cancelled) {
+        if (
+          known.name !== "RenderingCancelledException"
+          && !cancelled
+          && renderGeneration === previewRenderGenerationRef.current
+          && !isPdfJsDocumentTeardownError(error)
+        ) {
           setErrorText(`${tr("미리보기 렌더링 실패", "Preview render failed")}: ${formatError(error)}`);
         }
       }
@@ -1454,6 +1546,8 @@ function App() {
     searchTokenRef.current += 1;
     clearOutlineDragState();
     clearThumbnailPipeline();
+    revokeOverlayUrls(pageOverlaysRef.current);
+    pageOverlaysRef.current = [];
     await replacePdfDocument(null);
     clearPreviewCanvas();
     setPdfPath(null);
@@ -1487,21 +1581,32 @@ function App() {
     setIsSearchingDocument(false);
     setPageRotations({});
     pageRotationsRef.current = {};
-  }, [cancelProgressivePageLoad, clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument]);
+    setPageOverlays([]);
+    setIsFileDragActive(false);
+    setIsCurrentPdfEncrypted(false);
+      setSecurityModalMode(null);
+      setSecurityPassword("");
+      setSecurityConfirmPassword("");
+      setSecurityModalError(null);
+      setPendingProtectedPdfPath(null);
+  }, [cancelProgressivePageLoad, clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument, revokeOverlayUrls]);
 
-  const loadPdfFromPath = useCallback(async (path: string) => {
+  const loadPdfFromPath = useCallback(async (path: string, password?: string) => {
     setIsLoadingPdf(true);
     setStatus({ type: "loadingPdf", phase: "reading" });
     try {
-      await resetPdfWorkspace();
       setStatus({ type: "loadingPdf", phase: "reading" });
       const fileBytes = new Uint8Array(await readFile(path));
+      const previewBytes = cloneBytes(fileBytes);
+      const stateBytes = cloneBytes(fileBytes);
       setStatus({ type: "loadingPdf", phase: "opening" });
-      const task = getDocument({ data: fileBytes });
+      const task = getDocument({ data: previewBytes, password });
       const loadedDoc = await task.promise;
+      await resetPdfWorkspace();
       await replacePdfDocument(loadedDoc);
       setPdfPath(path);
-      setPdfBytes(fileBytes);
+      setPdfBytes(stateBytes);
+      await inspectCurrentPdfSecurity(stateBytes);
       setPageCount(loadedDoc.numPages);
       setPageOrder(loadedDoc.numPages > 0 ? [1] : []);
       setActivePage(1);
@@ -1518,16 +1623,30 @@ function App() {
       setPendingHydrationPageCount(loadedDoc.numPages);
       setPageRotations({});
       pageRotationsRef.current = {};
+      setPendingProtectedPdfPath(null);
       setStatus({ type: "loadingPdf", phase: "firstPage" });
       return true;
     } catch (error) {
+      if (isPdfPasswordRequiredError(error)) {
+        setPendingProtectedPdfPath(path);
+        setSecurityModalMode("open");
+        setSecurityConfirmPassword("");
+        setSecurityPassword(password ?? "");
+        setSecurityModalError(
+          password
+            ? tr("비밀번호가 올바르지 않습니다. 다시 입력해주세요.", "Incorrect password. Enter it again.")
+            : tr("이 PDF는 비밀번호가 필요합니다.", "This PDF requires a password."),
+        );
+        setStatus({ type: "ready" });
+        return false;
+      }
       setStatus({ type: "failed", reason: "pdfLoad" });
       setErrorText(`${tr("PDF 로딩 실패", "PDF loading failed")}: ${formatError(error)}`);
       return false;
     } finally {
       setIsLoadingPdf(false);
     }
-  }, [replacePdfDocument, resetPdfWorkspace, tr]);
+  }, [inspectCurrentPdfSecurity, isPdfPasswordRequiredError, replacePdfDocument, resetPdfWorkspace, tr]);
 
   const handleOpenPdf = useCallback(async () => {
     setErrorText(null);
@@ -1541,32 +1660,174 @@ function App() {
     await loadPdfFromPath(selected);
   }, [loadPdfFromPath, tr]);
 
+  const handleDroppedImagesOnPreview = useCallback(async (
+    paths: string[],
+    position: { x: number; y: number },
+  ) => {
+    if (!pdfDoc) {
+      showToast(tr("이미지를 놓기 전에 PDF를 먼저 열어주세요.", "Open a PDF before dropping an image."));
+      return;
+    }
+    const cssPoint = toCssPointFromDragDropPosition(position);
+    const targets = [
+      {
+        pageNumber: activePage,
+        slot: previewPrimarySlotRef.current,
+        viewport: primaryPreviewViewportRef.current,
+      },
+      {
+        pageNumber: secondaryPreviewPageNumberRef.current,
+        slot: previewSecondarySlotRef.current,
+        viewport: secondaryPreviewViewportRef.current,
+      },
+    ].filter((target): target is {
+      pageNumber: number;
+      slot: HTMLDivElement;
+      viewport: ReturnType<PDFPageProxy["getViewport"]>;
+    } => !!target.pageNumber && !!target.slot && !!target.viewport);
+
+    const target = targets.find(({ slot }) => {
+      const rect = slot.getBoundingClientRect();
+      return cssPoint.x >= rect.left && cssPoint.x <= rect.right && cssPoint.y >= rect.top && cssPoint.y <= rect.bottom;
+    });
+    if (!target) {
+      showToast(tr("이미지는 페이지 미리보기 위에 놓아주세요.", "Drop the image onto the page preview."));
+      return;
+    }
+
+    setErrorText(null);
+    try {
+      const created: PdfPageOverlay[] = [];
+      const slotRect = target.slot.getBoundingClientRect();
+      for (const [index, path] of paths.entries()) {
+        const mimeType = imageMimeTypeFromPath(path);
+        if (!mimeType) continue;
+        const rawBytes = new Uint8Array(await readFile(path));
+        const bytes = cloneBytes(rawBytes);
+        const blob = new Blob([bytes], { type: mimeType });
+        const { width: imageWidth, height: imageHeight } = await measureImage(blob);
+        const maxWidth = Math.max(64, slotRect.width * 0.35);
+        const maxHeight = Math.max(64, slotRect.height * 0.35);
+        const scale = Math.min(maxWidth / imageWidth, maxHeight / imageHeight, 1);
+        const drawWidth = Math.max(32, imageWidth * scale);
+        const drawHeight = Math.max(32, imageHeight * scale);
+        const centerX = cssPoint.x - slotRect.left + index * 18;
+        const centerY = cssPoint.y - slotRect.top + index * 18;
+        const left = clamp(centerX - drawWidth / 2, 0, Math.max(0, slotRect.width - drawWidth));
+        const top = clamp(centerY - drawHeight / 2, 0, Math.max(0, slotRect.height - drawHeight));
+        const rect = convertViewportRectToPdfRect(
+          target.viewport,
+          left,
+          top,
+          left + drawWidth,
+          top + drawHeight,
+        );
+        if (!rectHasArea(rect)) continue;
+        created.push({
+          id: createOutlineEntryId(),
+          kind: "image",
+          pageNumber: target.pageNumber,
+          rect,
+          mimeType,
+          bytes,
+          previewUrl: URL.createObjectURL(blob),
+          sourceName: path.split(/[\\/]/).pop() ?? "image",
+        });
+      }
+      if (created.length === 0) {
+        showToast(tr("드롭한 이미지 형식을 처리하지 못했습니다.", "The dropped image format is not supported."));
+        return;
+      }
+      setPageOverlays((prev) => [...prev, ...created]);
+      showToast(
+        tr(
+          `${created.length}개 이미지를 페이지에 배치했습니다.`,
+          `Placed ${created.length} image${created.length > 1 ? "s" : ""} on the page.`,
+        ),
+      );
+    } catch (error) {
+      setErrorText(`${tr("이미지 드롭 실패", "Image drop failed")}: ${formatError(error)}`);
+    }
+  }, [activePage, convertViewportRectToPdfRect, pdfDoc, showToast, toCssPointFromDragDropPosition, tr]);
+
+  const handleNativeFileDrop = useCallback(async (
+    paths: string[],
+    position?: { x: number; y: number },
+  ) => {
+    const pdfPaths = paths.filter(isPdfFilePath);
+    if (pdfPaths.length > 0) {
+      await loadPdfFromPath(pdfPaths[0]);
+      if (pdfPaths.length > 1) {
+        showToast(tr("여러 PDF 중 첫 번째 파일만 열었습니다.", "Opened only the first PDF from the drop."));
+      }
+      return;
+    }
+    const imagePaths = paths.filter(isImageFilePath);
+    if (imagePaths.length > 0) {
+      if (!position) {
+        showToast(tr("이미지 드롭 위치를 찾지 못했습니다.", "Could not determine the image drop position."));
+        return;
+      }
+      await handleDroppedImagesOnPreview(imagePaths, position);
+    }
+  }, [handleDroppedImagesOnPreview, loadPdfFromPath, showToast, tr]);
+
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
     const initialPath = searchParams.get("open");
     if (initialPath) {
       void loadPdfFromPath(initialPath);
     }
-    void (async () => {
-      try {
-        const pendingPath = await invoke<string | null>("take_next_pending_pdf_path");
-        if (pendingPath) {
-          await loadPdfFromPath(pendingPath);
+
+    // Tauri 환경에서만 추가 작업 수행
+    if (typeof window !== "undefined" && window.__TAURI__) {
+      void (async () => {
+        try {
+          const pendingPath = await invoke<string | null>("take_next_pending_pdf_path");
+          if (pendingPath) {
+            await loadPdfFromPath(pendingPath);
+          }
+        } catch {
+          // Ignore if command is temporarily unavailable.
         }
-      } catch {
-        // Ignore if command is temporarily unavailable.
-      }
-    })();
+      })();
+      let unlisten: (() => void) | null = null;
+      void listen<string>("pdf-open-request", (event) => {
+        void loadPdfFromPath(event.payload);
+      }).then((dispose) => {
+        unlisten = dispose;
+      });
+      return () => {
+        if (unlisten) unlisten();
+      };
+    }
+  }, [loadPdfFromPath]);
+
+  useEffect(() => {
+    // Tauri 환경에서만 드래그 앤 드롭 이벤트 리스너 등록
+    if (typeof window === "undefined" || !window.__TAURI__) return;
+
     let unlisten: (() => void) | null = null;
-    void listen<string>("pdf-open-request", (event) => {
-      void loadPdfFromPath(event.payload);
+    void getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === "enter" || event.payload.type === "over") {
+        setIsFileDragActive(true);
+        return;
+      }
+      if (event.payload.type === "leave") {
+        setIsFileDragActive(false);
+        return;
+      }
+      setIsFileDragActive(false);
+      void handleNativeFileDrop(event.payload.paths, event.payload.position);
     }).then((dispose) => {
       unlisten = dispose;
+    }).catch(() => {
+      setIsFileDragActive(false);
     });
     return () => {
       if (unlisten) unlisten();
     };
-  }, [loadPdfFromPath]);
+  }, [handleNativeFileDrop]);
 
   const handleOpenAddPdfModal = useCallback(async () => {
     if (!pdfDoc || !pdfBytes || isBusy) return;
@@ -1746,6 +2007,7 @@ function App() {
       clearThumbnailPipeline();
       await replacePdfDocument(mergedDoc);
       setPdfBytes(stateBytes);
+      setIsCurrentPdfEncrypted(false);
       if (!pdfPath && mergePdfPaths.length > 0) setPdfPath(mergePdfPaths[0]);
 
       const mergedCount = mergedDoc.numPages;
@@ -1857,6 +2119,7 @@ function App() {
       clearThumbnailPipeline();
       await replacePdfDocument(mergedDoc);
       setPdfBytes(stateBytes);
+      setIsCurrentPdfEncrypted(false);
 
       const mergedCount = mergedDoc.numPages;
       const mergedOrder = Array.from({ length: mergedCount }, (_, index) => index + 1);
@@ -1919,15 +2182,6 @@ function App() {
       const next = new Set(prev);
       if (next.has(pageNumber)) next.delete(pageNumber);
       else next.add(pageNumber);
-      return next;
-    });
-  }, []);
-
-  const removePageFromSelection = useCallback((pageNumber: number) => {
-    setSelectedPages((prev) => {
-      if (!prev.has(pageNumber)) return prev;
-      const next = new Set(prev);
-      next.delete(pageNumber);
       return next;
     });
   }, []);
@@ -2160,6 +2414,70 @@ function App() {
     return true;
   }, []);
 
+  const applyPageOverlaysToOutputDocument = useCallback(async (
+    outputDocument: PDFDocument,
+    sourceToOutputPage: Map<number, number>,
+  ) => {
+    const overlays = pageOverlaysRef.current.filter((overlay) => (
+      overlay.kind === "image" && sourceToOutputPage.has(overlay.pageNumber)
+    ));
+    if (overlays.length === 0) return;
+    for (const overlay of overlays) {
+      const outputPageNumber = sourceToOutputPage.get(overlay.pageNumber);
+      if (!outputPageNumber) continue;
+      const page = outputDocument.getPage(outputPageNumber - 1);
+      const rect = normalizePdfRect(overlay.rect);
+      const width = Math.max(1, rect.x2 - rect.x1);
+      const height = Math.max(1, rect.y2 - rect.y1);
+      page.drawRectangle({
+        x: rect.x1,
+        y: rect.y1,
+        width,
+        height,
+        color: rgb(1, 1, 1),
+        borderWidth: 0,
+      });
+      if (overlay.kind === "image") {
+        const image = overlay.mimeType === "image/png"
+          ? await outputDocument.embedPng(overlay.bytes)
+          : await outputDocument.embedJpg(overlay.bytes);
+        page.drawImage(image, {
+          x: rect.x1,
+          y: rect.y1,
+          width,
+          height,
+        });
+      }
+    }
+  }, []);
+
+  const applyStructuredTextEditsToPdfBytes = useCallback(async (
+    outputBytes: Uint8Array,
+    sourceToOutputPage: Map<number, number>,
+  ): Promise<Uint8Array> => {
+    const edits = pageOverlaysRef.current
+      .filter((overlay): overlay is PdfRedactionOverlay | PdfTextOverlay => (
+        (overlay.kind === "redact" || overlay.kind === "text")
+        && sourceToOutputPage.has(overlay.pageNumber)
+        && normalizeOutlineTitle(overlay.searchText).length > 0
+      ))
+      .map((overlay) => ({
+        pageNumber: sourceToOutputPage.get(overlay.pageNumber) ?? overlay.pageNumber,
+        searchText: normalizeOutlineTitle(overlay.searchText),
+        replacementText: overlay.kind === "text" ? overlay.text : "",
+      }));
+
+    if (edits.length === 0) return outputBytes;
+
+    const result = await invoke<ApplyPdfTextEditsResponse>("apply_pdf_text_edits", {
+      request: {
+        pdfBytes: Array.from(outputBytes),
+        edits,
+      },
+    });
+    return new Uint8Array(result.pdfBytes);
+  }, []);
+
   const buildSelectedPdfBytes = useCallback(async (): Promise<Uint8Array> => {
     if (!pdfBytes || selectedPageNumbers.length === 0) {
       throw new Error(tr("인쇄 또는 저장할 페이지가 없습니다.", "No pages selected to print or save."));
@@ -2193,8 +2511,132 @@ function App() {
     if (mappedOutlineEntries.length > 0) {
       applyOutlineEntriesToPdfDocument(outputDocument, mappedOutlineEntries);
     }
+    await applyPageOverlaysToOutputDocument(outputDocument, sourceToOutputPage);
+    const outputBytes = new Uint8Array(await outputDocument.save());
+    return applyStructuredTextEditsToPdfBytes(outputBytes, sourceToOutputPage);
+  }, [applyPageOverlaysToOutputDocument, applyStructuredTextEditsToPdfBytes, pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
+
+  const buildWorkspacePdfBytes = useCallback(async (excludedPageNumbers?: Set<number>): Promise<Uint8Array> => {
+    const existingOrder = pageOrder.length === pageCount
+      ? pageOrder
+      : Array.from({ length: pageCount }, (_, index) => index + 1);
+    if (!pdfBytes || existingOrder.length === 0) {
+      throw new Error(tr("현재 작업중인 페이지가 없습니다.", "There are no pages in the current workspace."));
+    }
+    let workingBytes = new Uint8Array(pdfBytes);
+    if (!hasPdfHeader(workingBytes) && pdfPath) {
+      const reloaded = new Uint8Array(await readFile(pdfPath));
+      if (hasPdfHeader(reloaded)) {
+        workingBytes = reloaded;
+        setPdfBytes(new Uint8Array(reloaded));
+      }
+    }
+    if (!hasPdfHeader(workingBytes)) {
+      throw new Error("Working PDF data is invalid. Please reopen the PDF and try again.");
+    }
+
+    const pagesToKeep = existingOrder.filter((pageNumber) => !excludedPageNumbers?.has(pageNumber));
+    if (pagesToKeep.length === 0) {
+      throw new Error(tr("삭제 후 남는 페이지가 없습니다.", "No pages remain after deletion."));
+    }
+
+    const sourceDocument = await PDFDocument.load(workingBytes, { updateMetadata: false });
+    const outputDocument = await PDFDocument.create();
+    const sourceToOutputPage = new Map<number, number>();
+    for (const [targetIndex, sourcePageNumber] of pagesToKeep.entries()) {
+      const extraRotation = pageRotationsRef.current[sourcePageNumber] ?? 0;
+      await appendPageWithRotation(outputDocument, sourceDocument, sourcePageNumber - 1, extraRotation);
+      sourceToOutputPage.set(sourcePageNumber, targetIndex + 1);
+    }
+    const mappedOutlineEntries = validOutlineEntries
+      .filter((entry) => sourceToOutputPage.has(entry.pageNumber))
+      .map((entry) => ({
+        ...entry,
+        id: createOutlineEntryId(),
+        pageNumber: sourceToOutputPage.get(entry.pageNumber) ?? entry.pageNumber,
+      }));
+    if (mappedOutlineEntries.length > 0) {
+      applyOutlineEntriesToPdfDocument(outputDocument, mappedOutlineEntries);
+    }
+    await applyPageOverlaysToOutputDocument(outputDocument, sourceToOutputPage);
     return new Uint8Array(await outputDocument.save());
-  }, [pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
+  }, [applyPageOverlaysToOutputDocument, pageCount, pageOrder, pdfBytes, pdfPath, tr, validOutlineEntries]);
+
+  const deletePageFromWorkspace = useCallback(async (pageNumber: number) => {
+    if (!pdfDoc || !pdfBytes || isBusy) return;
+    const existingOrder = pageOrder.length === pageCount
+      ? pageOrder
+      : Array.from({ length: pageCount }, (_, index) => index + 1);
+    const remainingPages = existingOrder.filter((value) => value !== pageNumber);
+    if (remainingPages.length === 0) {
+      await resetPdfWorkspace();
+      setStatus({ type: "ready" });
+      showToast(tr("마지막 페이지를 삭제하여 작업을 초기화했습니다.", "Deleted the last page and cleared the workspace."));
+      return;
+    }
+
+    setErrorText(null);
+    setIsSaving(true);
+    setStatus({ type: "savingPdf" });
+    try {
+      const outputBytes = await buildWorkspacePdfBytes(new Set([pageNumber]));
+      const previewBytes = cloneBytes(outputBytes);
+      const stateBytes = cloneBytes(outputBytes);
+      const task = getDocument({ data: previewBytes });
+      const nextDoc = await task.promise;
+      const nextSelectedPages = new Set<number>();
+      const nextOutlineEntries = validOutlineEntries
+        .filter((entry) => remainingPages.includes(entry.pageNumber))
+        .map((entry) => ({
+          ...entry,
+          pageNumber: remainingPages.indexOf(entry.pageNumber) + 1,
+        }));
+      remainingPages.forEach((oldPageNumber, index) => {
+        if (selectedPagesRef.current.has(oldPageNumber)) nextSelectedPages.add(index + 1);
+      });
+      const currentIndex = existingOrder.indexOf(pageNumber);
+      const fallbackIndex = Math.min(currentIndex, remainingPages.length - 1);
+      const nextActivePage = clamp(fallbackIndex + 1, 1, remainingPages.length);
+
+      clearThumbnailPipeline();
+      revokeOverlayUrls(pageOverlaysRef.current);
+      pageOverlaysRef.current = [];
+      await replacePdfDocument(nextDoc);
+      setPdfBytes(stateBytes);
+      setIsCurrentPdfEncrypted(false);
+      setPageCount(remainingPages.length);
+      setPageOrder(Array.from({ length: remainingPages.length }, (_, index) => index + 1));
+      setSelectedPages(nextSelectedPages);
+      setActivePage(nextActivePage);
+      setPageInput(String(nextActivePage));
+      setPageRotations({});
+      pageRotationsRef.current = {};
+      setPageOverlays([]);
+      setOutlineEntries(nextOutlineEntries);
+      setHasLoadedOutlineOnce(nextOutlineEntries.length > 0);
+      setStatus({ type: "loaded", pages: remainingPages.length });
+      showToast(tr("페이지를 삭제하고 번호를 다시 정리했습니다.", "Deleted the page and renumbered the workspace."));
+    } catch (error) {
+      setStatus({ type: "failed", reason: "pdfSave" });
+      setErrorText(`${tr("페이지 삭제 실패", "Failed to delete page")}: ${formatError(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [
+    buildWorkspacePdfBytes,
+    clearThumbnailPipeline,
+    isBusy,
+    pageCount,
+    pageOrder,
+    pdfBytes,
+    pdfDoc,
+    replacePdfDocument,
+    resetPdfWorkspace,
+    revokeOverlayUrls,
+    showToast,
+    tr,
+    validOutlineEntries,
+  ]);
 
   const handleSavePdf = useCallback(async () => {
     if (!pdfBytes || selectedPageNumbers.length === 0) return;
@@ -2232,6 +2674,165 @@ function App() {
       setIsSaving(false);
     }
   }, [buildSelectedPdfBytes, openExplorerAfterSave, pdfBytes, pdfPath, selectedPageNumbers.length, showToast, tr]);
+
+  const handleSaveProtectedPdf = useCallback(async (password: string) => {
+    setErrorText(null);
+    if (!pdfDoc || !pdfBytes) {
+      await message(tr("먼저 PDF를 열어주세요.", "Open a PDF first."), { title: tr("안내", "Notice") });
+      return false;
+    }
+    if (selectedPageNumbers.length === 0) {
+      await message(tr("암호 저장할 페이지를 하나 이상 선택해주세요.", "Select at least one page to save with password."), {
+        title: tr("안내", "Notice"),
+      });
+      return false;
+    }
+    const isOutlineReady = await waitForOutlineLoadToFinish();
+    if (!isOutlineReady) {
+      await message(
+        tr("목차 로딩이 끝난 뒤 다시 시도해주세요.", "Wait for outline loading to finish, then try again."),
+        { title: tr("안내", "Notice") },
+      );
+      return false;
+    }
+    const sourceStem = normalizeFileStem(pdfPath ?? "document.pdf");
+    const exportUuid = createExportUuid();
+    const targetPath = await save({
+      title: tr("암호 PDF 저장", "Save password-protected PDF"),
+      defaultPath: `${sourceStem}_${exportUuid}_protected.pdf`,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (!targetPath) return false;
+
+    setIsSaving(true);
+    setStatus({ type: "savingPdf" });
+    try {
+      const outputBytes = await buildSelectedPdfBytes();
+      await invoke("protect_pdf", {
+        request: {
+          pdfBytes: Array.from(outputBytes),
+          outputPath: targetPath,
+          password,
+          ownerPassword: null,
+        },
+      });
+      if (openExplorerAfterSave) {
+        try {
+          await revealItemInDir(targetPath);
+        } catch {
+          // Ignore explorer open failures; save itself already succeeded.
+        }
+      }
+      setStatus({ type: "savedPdf", pages: selectedPageNumbers.length });
+      showToast(
+        tr(
+          `암호가 걸린 PDF로 ${selectedPageNumbers.length}페이지를 저장했습니다.`,
+          `Saved ${selectedPageNumbers.length} selected pages as a password-protected PDF.`,
+        ),
+      );
+      return true;
+    } catch (error) {
+      setStatus({ type: "failed", reason: "pdfSave" });
+      setErrorText(`${tr("암호 PDF 저장 실패", "Failed to save password-protected PDF")}: ${formatError(error)}`);
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
+  }, [
+    buildSelectedPdfBytes,
+    openExplorerAfterSave,
+    pdfBytes,
+    pdfDoc,
+    pdfPath,
+    selectedPageNumbers.length,
+    showToast,
+    tr,
+    waitForOutlineLoadToFinish,
+  ]);
+
+  const handleUnprotectPdf = useCallback(async (password: string) => {
+    if (isBusy) return false;
+    setErrorText(null);
+    if (!pdfPath) return false;
+    const targetPath = await save({
+      title: tr("암호 해제 PDF 저장", "Save unlocked PDF"),
+      defaultPath: `${normalizeFileStem(pdfPath)}_${createExportUuid()}_unlocked.pdf`,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (!targetPath) return false;
+
+    setIsSaving(true);
+    setStatus({ type: "savingPdf" });
+    try {
+      await invoke("unprotect_pdf", {
+        request: {
+          inputPath: pdfPath,
+          outputPath: targetPath,
+          password,
+        },
+      });
+      if (openExplorerAfterSave) {
+        try {
+          await revealItemInDir(targetPath);
+        } catch {
+          // Ignore explorer open failures; save itself already succeeded.
+        }
+      }
+      setStatus({ type: "savedPdf", pages: 1 });
+      showToast(tr("보안 문서 암호를 해제하여 저장했습니다.", "Removed the PDF password and saved the file."));
+      return true;
+    } catch (error) {
+      setStatus({ type: "failed", reason: "pdfSave" });
+      setErrorText(`${tr("암호 해제 실패", "Failed to remove PDF password")}: ${formatError(error)}`);
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
+  }, [isBusy, openExplorerAfterSave, pdfPath, showToast, tr]);
+
+  const submitPdfSecurityModal = useCallback(async () => {
+    if (!securityModalMode) return;
+    const trimmedPassword = securityPassword.trim();
+    if (trimmedPassword.length === 0) {
+      setSecurityModalError(tr("비밀번호를 입력해주세요.", "Enter a password."));
+      return;
+    }
+    if (securityModalMode === "protect") {
+      if (selectedPageNumbers.length === 0) {
+        setSecurityModalError(tr("암호 저장할 페이지를 하나 이상 선택해주세요.", "Select at least one page to save with password."));
+        return;
+      }
+      if (trimmedPassword !== securityConfirmPassword.trim()) {
+        setSecurityModalError(tr("비밀번호 확인이 일치하지 않습니다.", "The confirmation password does not match."));
+        return;
+      }
+      const didSave = await handleSaveProtectedPdf(trimmedPassword);
+      if (didSave) closePdfSecurityModal();
+      return;
+    }
+    if (securityModalMode === "open") {
+      if (!pendingProtectedPdfPath) {
+        setSecurityModalError(tr("열 PDF 경로를 찾지 못했습니다.", "Could not find the PDF to open."));
+        return;
+      }
+      const didOpen = await loadPdfFromPath(pendingProtectedPdfPath, trimmedPassword);
+      if (didOpen) closePdfSecurityModal();
+      return;
+    }
+    const didUnlock = await handleUnprotectPdf(trimmedPassword);
+    if (didUnlock) closePdfSecurityModal();
+  }, [
+    closePdfSecurityModal,
+    handleSaveProtectedPdf,
+    handleUnprotectPdf,
+    loadPdfFromPath,
+    pendingProtectedPdfPath,
+    securityConfirmPassword,
+    securityModalMode,
+    securityPassword,
+    selectedPageNumbers.length,
+    tr,
+  ]);
 
   const handlePrintSelection = useCallback(async () => {
     if (!pdfDoc || !pdfBytes) {
@@ -2608,6 +3209,30 @@ function App() {
     }
   }, [pdfDoc, pdfPath, tr]);
 
+  useEffect(() => {
+    hasPrefetchedPdfInfoRef.current = false;
+  }, [pdfDoc, pdfPath]);
+
+  useEffect(() => {
+    const thumbnailsReady = pageCount > 0 && Object.keys(thumbnailUrls).length >= pageCount;
+    const pagesReady = pageCount > 0 && pageOrder.length === pageCount && pendingHydrationPageCount === 0;
+    if (!pdfDoc || isLoadingPdf || isSaving || isAddingPdf || isLoadingPdfInfo || hasPrefetchedPdfInfoRef.current) return;
+    if (!pagesReady || !thumbnailsReady) return;
+    hasPrefetchedPdfInfoRef.current = true;
+    void loadPdfInfo();
+  }, [
+    isAddingPdf,
+    isLoadingPdf,
+    isLoadingPdfInfo,
+    isSaving,
+    loadPdfInfo,
+    pageCount,
+    pageOrder.length,
+    pdfDoc,
+    pendingHydrationPageCount,
+    thumbnailUrls,
+  ]);
+
   const openPdfInfoModal = useCallback(() => {
     if (!pdfDoc || isBusy) return;
     setPdfInfoTab("metadata");
@@ -2698,6 +3323,25 @@ function App() {
                   >
                     <span className="btn-content"><ToolbarIcon name="save" />{tr("선택 저장", "Save selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.saveSelection}</span></span>
                   </button>
+                  {isCurrentPdfEncrypted ? (
+                    <button
+                      className="ghost-btn"
+                      onClick={openUnprotectPdfModal}
+                      disabled={!pdfDoc || !pdfPath || isBusy}
+                      title={tr("현재 열린 암호 PDF를 해제하여 새 파일로 저장합니다.", "Save the current encrypted PDF as a new unlocked file.")}
+                    >
+                      <span className="btn-content">{tr("보안해제", "Unlock PDF")}</span>
+                    </button>
+                  ) : (
+                    <button
+                      className="ghost-btn"
+                      onClick={openProtectPdfModal}
+                      disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
+                      title={tr("선택 페이지를 암호가 걸린 PDF로 저장합니다.", "Save selected pages as a password-protected PDF.")}
+                    >
+                      <span className="btn-content">{tr("암호저장", "Save Locked")}</span>
+                    </button>
+                  )}
                   <button
                     className="ghost-btn"
                     onClick={() => void handleClosePdf()}
@@ -3063,9 +3707,9 @@ function App() {
                           <button
                             type="button"
                             className="thumb-trash-btn"
-                            onClick={() => removePageFromSelection(pageNumber)}
+                            onClick={() => void deletePageFromWorkspace(pageNumber)}
                             disabled={isBusy}
-                            title={selectedPages.has(pageNumber) ? tr("선택 해제", "Remove from selection") : tr("선택되지 않음", "Not selected")}
+                            title={tr("현재 작업본에서 이 페이지를 삭제합니다.", "Delete this page from the current workspace.")}
                           >
                             {tr("휴지통", "Trash")}
                           </button>
@@ -3114,7 +3758,7 @@ function App() {
                       type="button"
                       onClick={() => jumpToOutlinePage(entry.pageNumber)}
                       style={{ paddingLeft: `${10 + normalizeOutlineDepth(entry.depth) * 16}px` }}
-                      title={`${entry.title} (${entry.pageNumber}p)`}
+                      title={`${entry.title} (${tr("페이지", "Page")} ${entry.pageNumber})`}
                     >
                       <span className="outline-view-title">{entry.title}</span>
                       <span className="outline-view-page">{entry.pageNumber}</span>
@@ -3342,6 +3986,46 @@ function App() {
                   >
                     {tr("선택→목차", "Sel->Outline")}
                   </button>
+                  <button
+                    className="ghost-btn micro-btn"
+                    onClick={() => {
+                      void applySelectedTextRedaction();
+                    }}
+                    type="button"
+                    disabled={isBusy || !rectHasArea(selectedPreviewPdfRect) || normalizeOutlineTitle(selectedPreviewText).length === 0}
+                    title={tr("선택한 텍스트를 흰색으로 가립니다.", "Cover the selected text with white redaction.")}
+                  >
+                    {tr("글자삭제", "Redact")}
+                  </button>
+                  <button
+                    className="ghost-btn micro-btn"
+                    onClick={() => {
+                      void applySelectedTextReplacement();
+                    }}
+                    type="button"
+                    disabled={isBusy || !rectHasArea(selectedPreviewPdfRect) || normalizeOutlineTitle(selectedPreviewText).length === 0}
+                    title={tr("선택한 텍스트를 새 문구로 덮어씁니다.", "Replace the selected text with new content.")}
+                  >
+                    {tr("글자수정", "Replace")}
+                  </button>
+                  <button
+                    className="ghost-btn micro-btn"
+                    onClick={removeLastOverlayOnActivePage}
+                    type="button"
+                    disabled={isBusy || activePageOverlays.length === 0}
+                    title={tr("현재 페이지에서 마지막 편집을 되돌립니다.", "Undo the latest edit on the current page.")}
+                  >
+                    {tr("되돌리기", "Undo")}
+                  </button>
+                  <button
+                    className="ghost-btn micro-btn"
+                    onClick={clearActivePageOverlays}
+                    type="button"
+                    disabled={isBusy || activePageOverlays.length === 0}
+                    title={tr("현재 페이지의 편집 오버레이를 모두 지웁니다.", "Clear all edit overlays from the current page.")}
+                  >
+                    {tr("페이지초기화", "Clear Page")}
+                  </button>
                   {showSearchBar ? (
                     <>
                     <label className="inline-field preview-search-field">
@@ -3416,12 +4100,21 @@ function App() {
                     </span>
                   )}
                 </div>
+                {isFileDragActive ? (
+                  <div className="file-drop-hint">
+                    {tr(
+                      "PDF를 놓으면 열고, 이미지를 페이지 위에 놓으면 해당 위치에 배치합니다.",
+                      "Drop a PDF to open it, or drop an image onto a page to place it there.",
+                    )}
+                  </div>
+                ) : null}
                 <div
                   className={`preview-page-stack ${previewSecondaryPageSize.width > 0 ? "spread" : ""}`}
                   style={previewStackStyle}
                 >
                   <div
                     className="preview-page-slot"
+                    ref={previewPrimarySlotRef}
                     style={{
                       width: `${previewPageSize.width}px`,
                       height: `${previewPageSize.height}px`,
@@ -3437,16 +4130,23 @@ function App() {
                       normalizedSelectionRect={normalizedPreviewSelectionRect}
                       layerRef={previewTextLayerRef}
                     />
+                    <div className="preview-overlay-layer">
+                      {renderPreviewOverlayNodes(activePageOverlays, primaryPreviewViewportRef.current)}
+                    </div>
                   </div>
                   {previewSecondaryPageSize.width > 0 ? (
                     <div
                       className="preview-page-slot secondary"
+                      ref={previewSecondarySlotRef}
                       style={{
                         width: `${previewSecondaryPageSize.width}px`,
                         height: `${previewSecondaryPageSize.height}px`,
                       }}
                     >
                       <canvas ref={previewCanvasSecondaryRef} />
+                      <div className="preview-overlay-layer">
+                        {renderPreviewOverlayNodes(secondaryPageOverlays, secondaryPreviewViewportRef.current)}
+                      </div>
                     </div>
                   ) : null}
                 </div>
@@ -3497,6 +4197,28 @@ function App() {
         isLoading={isLoadingPdfInfo}
         metadataFields={pdfInfoMetadataFields}
         fontNames={pdfInfoFontNames}
+      />
+
+      <PdfSecurityModal
+        isOpen={securityModalMode !== null}
+        tr={tr}
+        mode={securityModalMode ?? "protect"}
+        password={securityPassword}
+        confirmPassword={securityConfirmPassword}
+        errorText={securityModalError}
+        isSubmitting={isSaving}
+        onChangePassword={(value) => {
+          setSecurityPassword(value);
+          if (securityModalError) setSecurityModalError(null);
+        }}
+        onChangeConfirmPassword={(value) => {
+          setSecurityConfirmPassword(value);
+          if (securityModalError) setSecurityModalError(null);
+        }}
+        onClose={closePdfSecurityModal}
+        onSubmit={() => {
+          void submitPdfSecurityModal();
+        }}
       />
 
       <AddPdfModal
