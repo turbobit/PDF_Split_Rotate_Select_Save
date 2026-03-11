@@ -322,8 +322,8 @@ function App() {
         const storedPreviewZoomMode = settings["app.previewZoomMode"];
         const storedPreviewSpreadMode = settings["app.previewSpreadMode"];
         const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
-        const storedShowShortcuts = settings["app.showShortcuts"];
         const storedOpenPdfInNewWindow = settings["app.openPdfInNewWindow"];
+        const storedShowShortcuts = settings["app.showShortcuts"];
         const storedAiPanelOpen = settings["ai.panelOpen"];
 
         if (storedLocale === "ko" || storedLocale === "en") setLocale(storedLocale);
@@ -335,9 +335,9 @@ function App() {
           setPreviewZoomMode(storedPreviewZoomMode);
         }
         if (typeof storedPreviewSpreadMode === "boolean") setPreviewSpreadMode(storedPreviewSpreadMode);
-        if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
         if (typeof storedOpenPdfInNewWindow === "boolean") setOpenPdfInNewWindow(storedOpenPdfInNewWindow);
+        if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
         setHasHydratedStoredSettings(true);
       })
@@ -359,9 +359,9 @@ function App() {
         "app.previewZoom": previewZoom,
         "app.previewZoomMode": previewZoomMode,
         "app.previewSpreadMode": previewSpreadMode,
-        "app.showShortcuts": showShortcuts,
         "app.openExplorerAfterSave": openExplorerAfterSave,
         "app.openPdfInNewWindow": openPdfInNewWindow,
+        "app.showShortcuts": showShortcuts,
         "ai.panelOpen": showAiPanel,
       }).catch((error) => {
         setErrorText(`${tr("앱 설정 저장 실패", "Failed to save app settings")}: ${formatError(error)}`);
@@ -371,10 +371,10 @@ function App() {
   }, [
     hasHydratedStoredSettings,
     isToolbarCollapsed,
-    showShortcuts,
     locale,
     openExplorerAfterSave,
     openPdfInNewWindow,
+    showShortcuts,
     previewSpreadMode,
     previewZoom,
     previewZoomMode,
@@ -3350,7 +3350,6 @@ function App() {
                 <option value="no-open">{tr("안열기", "Do not open")}</option>
               </select>
             </label>
-          </div>
             <label className="inline-field">
               <span>{tr("PDF 연결", "PDF association")}</span>
               <select
@@ -3361,6 +3360,7 @@ function App() {
                 <option value="new">{tr("새창열기", "New window")}</option>
                 <option value="existing">{tr("기존창열기", "Existing window")}</option>
               </select>
+            </label>
             <label className="inline-field">
               <span>{tr("단축키", "Shortcuts")}</span>
               <select
@@ -3372,7 +3372,7 @@ function App() {
                 <option value="hide">{tr("안보이기", "Hide")}</option>
               </select>
             </label>
-            </label>
+          </div>
           <div className="toolbar-line-break" aria-hidden="true" />
 
           <div className="action-group toolbar-block view-block">
