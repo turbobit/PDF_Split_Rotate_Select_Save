@@ -881,35 +881,6 @@ input:disabled {
   background: rgba(255, 255, 255, 0.9);
 }
 
-.preview-redact-overlay {
-  position: absolute;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px dashed rgba(179, 53, 53, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
-}
-
-.preview-text-edit-overlay {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  padding: 1px 3px;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(52, 112, 73, 0.45);
-  border-radius: 3px;
-  color: #162213;
-  font-size: 12px;
-  line-height: 1.15;
-  overflow: hidden;
-  box-shadow: 0 8px 14px rgba(32, 24, 17, 0.12);
-}
-
-.preview-text-edit-overlay span {
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .file-drop-hint {
   width: min(100%, 920px);
   margin-bottom: 8px;

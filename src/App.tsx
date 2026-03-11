@@ -33,9 +33,7 @@ import {
   PAGE_LOAD_BATCH_SIZE,
   PdfPageOverlay,
   PdfRect,
-  PdfRedactionOverlay,
   PdfSecurityMode,
-  PdfTextOverlay,
   PreviewTextLayer,
   readStoredZoom,
   rectHasArea,
@@ -99,11 +97,6 @@ const AiChatPanel = lazy(() => import("./components/AiChatPanel"));
 
 type InspectPdfSecurityResponse = {
   isEncrypted: boolean;
-};
-
-type ApplyPdfTextEditsResponse = {
-  pdfBytes: number[];
-  appliedEdits: number;
 };
 
 function App() {
@@ -190,7 +183,6 @@ function App() {
   const [draggingOutlineIndex, setDraggingOutlineIndex] = useState<number | null>(null);
   const [outlineDropTargetId, setOutlineDropTargetId] = useState<string | null>(null);
   const [pageOverlays, setPageOverlays] = useState<PdfPageOverlay[]>([]);
-  const [selectedPreviewPdfRect, setSelectedPreviewPdfRect] = useState<PdfRect | null>(null);
   const [isFileDragActive, setIsFileDragActive] = useState(false);
   const [isCurrentPdfEncrypted, setIsCurrentPdfEncrypted] = useState(false);
   const [securityModalMode, setSecurityModalMode] = useState<PdfSecurityMode | null>(null);
@@ -573,91 +565,8 @@ function App() {
         />
       );
     }
-    if (overlay.kind === "text") {
-      return (
-        <div key={overlay.id} className="preview-text-edit-overlay" style={style}>
-          <span>{overlay.text}</span>
-        </div>
-      );
-    }
-    return <div key={overlay.id} className="preview-redact-overlay" style={style} />;
+    return null;
   }), [getPreviewOverlayStyle]);
-
-  const removeLastOverlayOnActivePage = useCallback(() => {
-    setPageOverlays((prev) => {
-      const targetIndex = [...prev].reverse().findIndex((overlay) => overlay.pageNumber === activePage);
-      if (targetIndex < 0) return prev;
-      const actualIndex = prev.length - targetIndex - 1;
-      const removed = prev[actualIndex];
-      if (removed?.kind === "image") URL.revokeObjectURL(removed.previewUrl);
-      return prev.filter((_, index) => index !== actualIndex);
-    });
-  }, [activePage]);
-
-  const clearActivePageOverlays = useCallback(() => {
-    setPageOverlays((prev) => {
-      const removed = prev.filter((overlay) => overlay.pageNumber === activePage);
-      revokeOverlayUrls(removed);
-      return prev.filter((overlay) => overlay.pageNumber !== activePage);
-    });
-  }, [activePage, revokeOverlayUrls]);
-
-  const applySelectedTextRedaction = useCallback(async () => {
-    const searchText = normalizeOutlineTitle(selectedPreviewText);
-    if (!rectHasArea(selectedPreviewPdfRect) || searchText.length === 0) {
-      await message(tr("본문에서 텍스트를 먼저 선택해주세요.", "Select text in the page body first."), {
-        title: tr("안내", "Notice"),
-      });
-      return;
-    }
-    setPageOverlays((prev) => [
-      ...prev,
-      {
-        id: createOutlineEntryId(),
-        kind: "redact",
-        pageNumber: activePage,
-        rect: selectedPreviewPdfRect,
-        searchText,
-      },
-    ]);
-    showToast(tr("선택한 텍스트를 가림 처리했습니다.", "Redacted the selected text."));
-    focusPreviewArea();
-  }, [activePage, focusPreviewArea, selectedPreviewPdfRect, selectedPreviewText, showToast, tr]);
-
-  const applySelectedTextReplacement = useCallback(async () => {
-    const searchText = normalizeOutlineTitle(selectedPreviewText);
-    if (!rectHasArea(selectedPreviewPdfRect) || searchText.length === 0) {
-      await message(tr("본문에서 텍스트를 먼저 선택해주세요.", "Select text in the page body first."), {
-        title: tr("안내", "Notice"),
-      });
-      return;
-    }
-    const replacement = window.prompt(
-      tr("바꿀 텍스트를 입력하세요.", "Enter replacement text."),
-      normalizeOutlineTitle(selectedPreviewText),
-    );
-    const nextText = normalizeOutlineTitle(replacement ?? "");
-    if (nextText.length === 0) return;
-    const fontSize = clamp(
-      Math.round(Math.max(10, Math.abs(selectedPreviewPdfRect.y2 - selectedPreviewPdfRect.y1) * 0.82)),
-      10,
-      28,
-    );
-    setPageOverlays((prev) => [
-      ...prev,
-      {
-        id: createOutlineEntryId(),
-        kind: "text",
-        pageNumber: activePage,
-        rect: selectedPreviewPdfRect,
-        searchText,
-        text: nextText,
-        fontSize,
-      },
-    ]);
-    showToast(tr("선택한 텍스트를 덮어썼습니다.", "Replaced the selected text."));
-    focusPreviewArea();
-  }, [activePage, focusPreviewArea, selectedPreviewPdfRect, selectedPreviewText, showToast, tr]);
 
   const buildAiCitationSearchQuery = useCallback((text: string) => {
     const tokens = normalizeSearchQuery(text)
@@ -681,7 +590,6 @@ function App() {
     setIsAreaSelectMode(false);
     setIsAreaSelecting(false);
     setPreviewSelectionRect(null);
-    setSelectedPreviewPdfRect(null);
   }, [previewSpreadMode]);
 
   const clearThumbnailPipeline = useCallback(() => {
@@ -724,7 +632,6 @@ function App() {
     setPreviewSecondaryPageSize({ width: 0, height: 0 });
     setPreviewTextSpans([]);
     setSelectedPreviewText("");
-    setSelectedPreviewPdfRect(null);
     setPreviewSelectionRect(null);
     setIsAreaSelecting(false);
     primaryPreviewViewportRef.current = null;
@@ -1076,7 +983,6 @@ function App() {
     setIsAreaSelecting(true);
     setPreviewSelectionRect({ x1: x, y1: y, x2: x, y2: y });
     setSelectedPreviewText("");
-    setSelectedPreviewPdfRect(null);
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) selection.removeAllRanges();
     event.preventDefault();
@@ -1114,20 +1020,7 @@ function App() {
       }
       setPreviewSelectionRect(null);
       const joined = normalizeOutlineTitle(selected.join(" "));
-      if (joined.length > 0) {
-        setSelectedPreviewText(joined);
-        setSelectedPreviewPdfRect(
-          convertViewportRectToPdfRect(
-            primaryPreviewViewportRef.current,
-            normalized.left,
-            normalized.top,
-            normalized.right,
-            normalized.bottom,
-          ),
-        );
-      } else {
-        setSelectedPreviewPdfRect(null);
-      }
+      if (joined.length > 0) setSelectedPreviewText(joined);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", stop);
@@ -1145,7 +1038,6 @@ function App() {
       if (!selection || !layer) return;
       if (selection.isCollapsed) {
         setSelectedPreviewText("");
-        setSelectedPreviewPdfRect(null);
         return;
       }
       const anchor = selection.anchorNode;
@@ -1153,26 +1045,10 @@ function App() {
       const isInsideLayer = (node: Node | null) => !!node && (node === layer || layer.contains(node));
       if (!isInsideLayer(anchor) || !isInsideLayer(focus)) return;
       setSelectedPreviewText(normalizeOutlineTitle(selection.toString()));
-      if (selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        const rects = Array.from(range.getClientRects());
-        const layerRect = layer.getBoundingClientRect();
-        if (rects.length > 0) {
-          const left = Math.min(...rects.map((rect) => rect.left)) - layerRect.left;
-          const top = Math.min(...rects.map((rect) => rect.top)) - layerRect.top;
-          const right = Math.max(...rects.map((rect) => rect.right)) - layerRect.left;
-          const bottom = Math.max(...rects.map((rect) => rect.bottom)) - layerRect.top;
-          setSelectedPreviewPdfRect(
-            convertViewportRectToPdfRect(primaryPreviewViewportRef.current, left, top, right, bottom),
-          );
-        } else {
-          setSelectedPreviewPdfRect(null);
-        }
-      }
     };
     document.addEventListener("selectionchange", onSelectionChange);
     return () => document.removeEventListener("selectionchange", onSelectionChange);
-  }, [convertViewportRectToPdfRect, isAreaSelecting, isAreaSelectMode]);
+  }, [isAreaSelecting, isAreaSelectMode]);
 
   const isPageProtected = useCallback((pageNumber: number) => {
     return pageNumber === activePageRef.current || visiblePagesRef.current.has(pageNumber);
@@ -2451,33 +2327,6 @@ function App() {
     }
   }, []);
 
-  const applyStructuredTextEditsToPdfBytes = useCallback(async (
-    outputBytes: Uint8Array,
-    sourceToOutputPage: Map<number, number>,
-  ): Promise<Uint8Array> => {
-    const edits = pageOverlaysRef.current
-      .filter((overlay): overlay is PdfRedactionOverlay | PdfTextOverlay => (
-        (overlay.kind === "redact" || overlay.kind === "text")
-        && sourceToOutputPage.has(overlay.pageNumber)
-        && normalizeOutlineTitle(overlay.searchText).length > 0
-      ))
-      .map((overlay) => ({
-        pageNumber: sourceToOutputPage.get(overlay.pageNumber) ?? overlay.pageNumber,
-        searchText: normalizeOutlineTitle(overlay.searchText),
-        replacementText: overlay.kind === "text" ? overlay.text : "",
-      }));
-
-    if (edits.length === 0) return outputBytes;
-
-    const result = await invoke<ApplyPdfTextEditsResponse>("apply_pdf_text_edits", {
-      request: {
-        pdfBytes: Array.from(outputBytes),
-        edits,
-      },
-    });
-    return new Uint8Array(result.pdfBytes);
-  }, []);
-
   const buildSelectedPdfBytes = useCallback(async (): Promise<Uint8Array> => {
     if (!pdfBytes || selectedPageNumbers.length === 0) {
       throw new Error(tr("인쇄 또는 저장할 페이지가 없습니다.", "No pages selected to print or save."));
@@ -2512,9 +2361,8 @@ function App() {
       applyOutlineEntriesToPdfDocument(outputDocument, mappedOutlineEntries);
     }
     await applyPageOverlaysToOutputDocument(outputDocument, sourceToOutputPage);
-    const outputBytes = new Uint8Array(await outputDocument.save());
-    return applyStructuredTextEditsToPdfBytes(outputBytes, sourceToOutputPage);
-  }, [applyPageOverlaysToOutputDocument, applyStructuredTextEditsToPdfBytes, pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
+    return new Uint8Array(await outputDocument.save());
+  }, [applyPageOverlaysToOutputDocument, pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
 
   const buildWorkspacePdfBytes = useCallback(async (excludedPageNumbers?: Set<number>): Promise<Uint8Array> => {
     const existingOrder = pageOrder.length === pageCount
@@ -3985,46 +3833,6 @@ function App() {
                     title={tr("선택 텍스트를 목차에 추가", "Add selected text to outline")}
                   >
                     {tr("선택→목차", "Sel->Outline")}
-                  </button>
-                  <button
-                    className="ghost-btn micro-btn"
-                    onClick={() => {
-                      void applySelectedTextRedaction();
-                    }}
-                    type="button"
-                    disabled={isBusy || !rectHasArea(selectedPreviewPdfRect) || normalizeOutlineTitle(selectedPreviewText).length === 0}
-                    title={tr("선택한 텍스트를 흰색으로 가립니다.", "Cover the selected text with white redaction.")}
-                  >
-                    {tr("글자삭제", "Redact")}
-                  </button>
-                  <button
-                    className="ghost-btn micro-btn"
-                    onClick={() => {
-                      void applySelectedTextReplacement();
-                    }}
-                    type="button"
-                    disabled={isBusy || !rectHasArea(selectedPreviewPdfRect) || normalizeOutlineTitle(selectedPreviewText).length === 0}
-                    title={tr("선택한 텍스트를 새 문구로 덮어씁니다.", "Replace the selected text with new content.")}
-                  >
-                    {tr("글자수정", "Replace")}
-                  </button>
-                  <button
-                    className="ghost-btn micro-btn"
-                    onClick={removeLastOverlayOnActivePage}
-                    type="button"
-                    disabled={isBusy || activePageOverlays.length === 0}
-                    title={tr("현재 페이지에서 마지막 편집을 되돌립니다.", "Undo the latest edit on the current page.")}
-                  >
-                    {tr("되돌리기", "Undo")}
-                  </button>
-                  <button
-                    className="ghost-btn micro-btn"
-                    onClick={clearActivePageOverlays}
-                    type="button"
-                    disabled={isBusy || activePageOverlays.length === 0}
-                    title={tr("현재 페이지의 편집 오버레이를 모두 지웁니다.", "Clear all edit overlays from the current page.")}
-                  >
-                    {tr("페이지초기화", "Clear Page")}
                   </button>
                   {showSearchBar ? (
                     <>

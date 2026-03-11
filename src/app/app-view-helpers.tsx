@@ -127,25 +127,7 @@ export type PdfImageOverlay = {
   sourceName: string;
 };
 
-export type PdfRedactionOverlay = {
-  id: string;
-  kind: "redact";
-  pageNumber: number;
-  rect: PdfRect;
-  searchText: string;
-};
-
-export type PdfTextOverlay = {
-  id: string;
-  kind: "text";
-  pageNumber: number;
-  rect: PdfRect;
-  searchText: string;
-  text: string;
-  fontSize: number;
-};
-
-export type PdfPageOverlay = PdfImageOverlay | PdfRedactionOverlay | PdfTextOverlay;
+export type PdfPageOverlay = PdfImageOverlay;
 export type PdfSecurityMode = "protect" | "unprotect" | "open";
 
 export function normalizePdfRect(rect: PdfRect): PdfRect {
