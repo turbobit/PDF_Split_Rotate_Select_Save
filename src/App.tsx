@@ -118,6 +118,7 @@ function App() {
   const [isGeneratingOutline, setIsGeneratingOutline] = useState(false);
   const [saveType, setSaveType] = useState<SaveType>("pdf");
   const [openExplorerAfterSave, setOpenExplorerAfterSave] = useState(true);
+  const [openPdfInNewWindow, setOpenPdfInNewWindow] = useState(true);
   const [quickSelectInput, setQuickSelectInput] = useState("");
   const [rangeFromInput, setRangeFromInput] = useState("");
   const [rangeToInput, setRangeToInput] = useState("");
@@ -320,6 +321,7 @@ function App() {
         const storedPreviewZoomMode = settings["app.previewZoomMode"];
         const storedPreviewSpreadMode = settings["app.previewSpreadMode"];
         const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
+        const storedOpenPdfInNewWindow = settings["app.openPdfInNewWindow"];
         const storedAiPanelOpen = settings["ai.panelOpen"];
 
         if (storedLocale === "ko" || storedLocale === "en") setLocale(storedLocale);
@@ -332,6 +334,7 @@ function App() {
         }
         if (typeof storedPreviewSpreadMode === "boolean") setPreviewSpreadMode(storedPreviewSpreadMode);
         if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
+        if (typeof storedOpenPdfInNewWindow === "boolean") setOpenPdfInNewWindow(storedOpenPdfInNewWindow);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
         setHasHydratedStoredSettings(true);
       })
@@ -354,6 +357,7 @@ function App() {
         "app.previewZoomMode": previewZoomMode,
         "app.previewSpreadMode": previewSpreadMode,
         "app.openExplorerAfterSave": openExplorerAfterSave,
+        "app.openPdfInNewWindow": openPdfInNewWindow,
         "ai.panelOpen": showAiPanel,
       }).catch((error) => {
         setErrorText(`${tr("앱 설정 저장 실패", "Failed to save app settings")}: ${formatError(error)}`);
@@ -365,6 +369,7 @@ function App() {
     isToolbarCollapsed,
     locale,
     openExplorerAfterSave,
+    openPdfInNewWindow,
     previewSpreadMode,
     previewZoom,
     previewZoomMode,
@@ -3361,6 +3366,17 @@ function App() {
               </select>
             </label>
           </div>
+            <label className="inline-field">
+              <span>{tr("PDF 연결", "PDF association")}</span>
+              <select
+                value={openPdfInNewWindow ? "new" : "existing"}
+                onChange={(event) => setOpenPdfInNewWindow(event.currentTarget.value === "new")}
+                disabled={isBusy}
+              >
+                <option value="new">{tr("새창열기", "New window")}</option>
+                <option value="existing">{tr("기존창열기", "Existing window")}</option>
+              </select>
+            </label>
           <div className="toolbar-line-break" aria-hidden="true" />
 
           <div className="action-group toolbar-block view-block">

@@ -3010,11 +3010,27 @@ pub fn run() {
                         .filter(|path| is_pdf_path(path))
                         .map(|path| path.to_string_lossy().to_string())
                         .collect::<Vec<_>>();
-                    if !paths.is_empty() {
+                    if paths.is_empty() {
+                        return;
+                    }
+                    let open_in_new_window = _app
+                        .try_state::<AppState>()
+                        .and_then(|state| load_settings_bundle_inner(&*state).ok())
+                        .and_then(|bundle| bundle.settings.get("app.openPdfInNewWindow"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if open_in_new_window {
                         let state = _app.state::<PendingPdfPaths>();
                         enqueue_pdf_paths(&state, paths.clone());
                         for _ in paths {
                             create_main_like_window(_app);
+                        }
+                    } else if let Some(first_path) = paths.first() {
+                        for (label, window) in _app.webview_windows().iter() {
+                            if label == "main" || label.starts_with("main-") {
+                                let _ = window.emit("pdf-open-request", first_path);
+                                break;
+                            }
                         }
                     }
                 }
