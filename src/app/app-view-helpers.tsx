@@ -10,7 +10,6 @@ export type ToolbarIconName =
   | "apply"
   | "selectAll"
   | "clear"
-  | "rangeAdd"
   | "rangeRemove"
   | "save"
   | "singlePage"
@@ -46,8 +45,6 @@ export function ToolbarIcon({ name }: { name: ToolbarIconName }) {
       return <svg {...commonProps}><path d="M2.5 3.5h4v4h-4z" /><path d="M9.5 3.5h4v4h-4z" /><path d="M2.5 10.5h4v2h-4z" /><path d="M10 11.5l1.5 1.5 2.5-3" /></svg>;
     case "clear":
       return <svg {...commonProps}><path d="M3 4.5h10" /><path d="M5 4.5V3h6v1.5" /><path d="M4.5 4.5l.8 8h5.4l.8-8" /><path d="M6.5 6.5v4" /><path d="M9.5 6.5v4" /></svg>;
-    case "rangeAdd":
-      return <svg {...commonProps}><path d="M2.5 5.5h5" /><path d="M2.5 10.5h5" /><path d="M11.5 5.5v5" /><path d="M9 8h5" /></svg>;
     case "rangeRemove":
       return <svg {...commonProps}><path d="M2.5 5.5h5" /><path d="M2.5 10.5h5" /><path d="M9 8h5" /></svg>;
     case "save":
@@ -73,7 +70,6 @@ export const SHORTCUT_LABELS = {
   applyQuickSelection: "Enter",
   selectAllPages: "Ctrl+A",
   clearSelection: "Esc",
-  addRange: "Ctrl+Shift+=",
   removeRange: "Ctrl+-",
   previousPage: "PageUp",
   nextPage: "PageDown",

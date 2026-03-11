@@ -119,6 +119,7 @@ function App() {
   const [saveType, setSaveType] = useState<SaveType>("pdf");
   const [openExplorerAfterSave, setOpenExplorerAfterSave] = useState(true);
   const [openPdfInNewWindow, setOpenPdfInNewWindow] = useState(true);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const [quickSelectInput, setQuickSelectInput] = useState("");
   const [rangeFromInput, setRangeFromInput] = useState("");
   const [rangeToInput, setRangeToInput] = useState("");
@@ -321,6 +322,7 @@ function App() {
         const storedPreviewZoomMode = settings["app.previewZoomMode"];
         const storedPreviewSpreadMode = settings["app.previewSpreadMode"];
         const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
+        const storedShowShortcuts = settings["app.showShortcuts"];
         const storedOpenPdfInNewWindow = settings["app.openPdfInNewWindow"];
         const storedAiPanelOpen = settings["ai.panelOpen"];
 
@@ -333,6 +335,7 @@ function App() {
           setPreviewZoomMode(storedPreviewZoomMode);
         }
         if (typeof storedPreviewSpreadMode === "boolean") setPreviewSpreadMode(storedPreviewSpreadMode);
+        if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
         if (typeof storedOpenPdfInNewWindow === "boolean") setOpenPdfInNewWindow(storedOpenPdfInNewWindow);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
@@ -356,6 +359,7 @@ function App() {
         "app.previewZoom": previewZoom,
         "app.previewZoomMode": previewZoomMode,
         "app.previewSpreadMode": previewSpreadMode,
+        "app.showShortcuts": showShortcuts,
         "app.openExplorerAfterSave": openExplorerAfterSave,
         "app.openPdfInNewWindow": openPdfInNewWindow,
         "ai.panelOpen": showAiPanel,
@@ -367,6 +371,7 @@ function App() {
   }, [
     hasHydratedStoredSettings,
     isToolbarCollapsed,
+    showShortcuts,
     locale,
     openExplorerAfterSave,
     openPdfInNewWindow,
@@ -2953,18 +2958,6 @@ function App() {
         setSelectedPages(new Set());
         return;
       }
-      if (!editable && ctrlOrMeta && shift && event.key === "+") {
-        if (!pdfDoc) return;
-        event.preventDefault();
-        void applyRangeSelection("add");
-        return;
-      }
-      if (!editable && ctrlOrMeta && shift && event.key === "=") {
-        if (!pdfDoc) return;
-        event.preventDefault();
-        void applyRangeSelection("add");
-        return;
-      }
       if (!editable && ctrlOrMeta && !shift && key === "-") {
         if (!pdfDoc) return;
         event.preventDefault();
@@ -3135,36 +3128,36 @@ function App() {
                 className="primary-btn"
                 onClick={() => void handleOpenPdf()}
                 disabled={isBusy}
-                title={withShortcutHint(tr("PDF 열기", "Open PDF"), SHORTCUT_LABELS.openPdf)}
+                title={withShortcutHint(tr("PDF 열기", "Open PDF"), showShortcuts ? SHORTCUT_LABELS.openPdf : undefined)}
               >
                 <span className="btn-content">
                   <ToolbarIcon name="open" />
                   {tr("PDF 열기", "Open PDF")}
-                  <span className="btn-shortcut">{SHORTCUT_LABELS.openPdf}</span>
+                  {showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.openPdf}</span>}
                 </span>
               </button>
               <button
                 className="ghost-btn"
                 onClick={() => void handleOpenAddPdfModal()}
                 disabled={!pdfDoc || !pdfBytes || isBusy}
-                title={withShortcutHint(tr("PDF 추가", "Add PDF"), SHORTCUT_LABELS.addPdf)}
+                title={withShortcutHint(tr("PDF 추가", "Add PDF"), showShortcuts ? SHORTCUT_LABELS.addPdf : undefined)}
               >
                 <span className="btn-content">
                   <ToolbarIcon name="add" />
                   {tr("PDF 추가", "Add PDF")}
-                  <span className="btn-shortcut">{SHORTCUT_LABELS.addPdf}</span>
+                  {showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.addPdf}</span>}
                 </span>
               </button>
               <button
                 className="ghost-btn"
                 onClick={() => void handleMergePdfs()}
                 disabled={isBusy}
-                title={withShortcutHint(tr("PDF 병합", "Merge PDFs"), SHORTCUT_LABELS.mergePdfs)}
+                title={withShortcutHint(tr("PDF 병합", "Merge PDFs"), showShortcuts ? SHORTCUT_LABELS.mergePdfs : undefined)}
               >
                 <span className="btn-content">
                   <ToolbarIcon name="merge" />
                   {tr("PDF 병합", "Merge PDFs")}
-                  <span className="btn-shortcut">{SHORTCUT_LABELS.mergePdfs}</span>
+                  {showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.mergePdfs}</span>}
                 </span>
               </button>
               {pdfDoc ? (
@@ -3173,9 +3166,9 @@ function App() {
                     className="primary-btn"
                     onClick={() => void handleSaveSelection()}
                     disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
-                    title={withShortcutHint(tr("선택 저장", "Save selection"), SHORTCUT_LABELS.saveSelection)}
+                    title={withShortcutHint(tr("선택 저장", "Save selection"), showShortcuts ? SHORTCUT_LABELS.saveSelection : undefined)}
                   >
-                    <span className="btn-content"><ToolbarIcon name="save" />{tr("선택 저장", "Save selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.saveSelection}</span></span>
+                    <span className="btn-content"><ToolbarIcon name="save" />{tr("선택 저장", "Save selection")}{showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.saveSelection}</span>}</span>
                   </button>
                   {isCurrentPdfEncrypted ? (
                     <button
@@ -3200,12 +3193,12 @@ function App() {
                     className="ghost-btn"
                     onClick={() => void handleClosePdf()}
                     disabled={isBusy}
-                    title={withShortcutHint(tr("닫기", "Close"), SHORTCUT_LABELS.closePdf)}
+                    title={withShortcutHint(tr("닫기", "Close"), showShortcuts ? SHORTCUT_LABELS.closePdf : undefined)}
                   >
                     <span className="btn-content">
                       <ToolbarIcon name="close" />
                       {tr("닫기", "Close")}
-                      <span className="btn-shortcut">{SHORTCUT_LABELS.closePdf}</span>
+                      {showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.closePdf}</span>}
                     </span>
                   </button>
                 </>
@@ -3295,33 +3288,33 @@ function App() {
               className="ghost-btn"
               onClick={() => void applyQuickSelection()}
               disabled={!pdfDoc || isBusy}
-              title={withShortcutHint(tr("적용", "Apply"), SHORTCUT_LABELS.applyQuickSelection)}
+              title={withShortcutHint(tr("적용", "Apply"), showShortcuts ? SHORTCUT_LABELS.applyQuickSelection : undefined)}
             >
-              <span className="btn-content"><ToolbarIcon name="apply" />{tr("적용", "Apply")}<span className="btn-shortcut">{SHORTCUT_LABELS.applyQuickSelection}</span></span>
+              <span className="btn-content"><ToolbarIcon name="apply" />{tr("적용", "Apply")}{showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.applyQuickSelection}</span>}</span>
             </button>
             <button
               className="ghost-btn"
               onClick={() => setSelectedPages(new Set(pageNumbers))}
               disabled={!pdfDoc || isBusy || pageCount === 0}
-              title={withShortcutHint(tr("전체 선택", "Select all"), SHORTCUT_LABELS.selectAllPages)}
+              title={withShortcutHint(tr("전체 선택", "Select all"), showShortcuts ? SHORTCUT_LABELS.selectAllPages : undefined)}
             >
-              <span className="btn-content"><ToolbarIcon name="selectAll" />{tr("전체 선택", "Select all")}<span className="btn-shortcut">{SHORTCUT_LABELS.selectAllPages}</span></span>
+              <span className="btn-content"><ToolbarIcon name="selectAll" />{tr("전체 선택", "Select all")}{showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.selectAllPages}</span>}</span>
             </button>
             <button
               className="ghost-btn"
               onClick={() => setSelectedPages(new Set())}
               disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
-              title={withShortcutHint(tr("선택 해제", "Clear selection"), SHORTCUT_LABELS.clearSelection)}
+              title={withShortcutHint(tr("선택 해제", "Clear selection"), showShortcuts ? SHORTCUT_LABELS.clearSelection : undefined)}
             >
-              <span className="btn-content"><ToolbarIcon name="clear" />{tr("선택 해제", "Clear selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.clearSelection}</span></span>
+              <span className="btn-content"><ToolbarIcon name="clear" />{tr("선택 해제", "Clear selection")}{showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.clearSelection}</span>}</span>
             </button>
             <button
               className="ghost-btn"
               onClick={() => void handlePrintSelection()}
               disabled={!pdfDoc || isBusy || selectedPageNumbers.length === 0}
-              title={withShortcutHint(tr("선택 인쇄", "Print selection"), SHORTCUT_LABELS.printSelection)}
+              title={withShortcutHint(tr("선택 인쇄", "Print selection"), showShortcuts ? SHORTCUT_LABELS.printSelection : undefined)}
             >
-              <span className="btn-content"><ToolbarIcon name="print" />{tr("선택 인쇄", "Print selection")}<span className="btn-shortcut">{SHORTCUT_LABELS.printSelection}</span></span>
+              <span className="btn-content"><ToolbarIcon name="print" />{tr("선택 인쇄", "Print selection")}{showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.printSelection}</span>}</span>
             </button>
             <label className="inline-field range-field"><span>{tr("범위 선택", "Range select")}</span>
               <input value={rangeFromInput} onChange={(event) => setRangeFromInput(event.currentTarget.value)} placeholder={tr("시작", "Start")} inputMode="numeric" disabled={!pdfDoc || isBusy} />
@@ -3330,19 +3323,11 @@ function App() {
             </label>
             <button
               className="ghost-btn"
-              onClick={() => void applyRangeSelection("add")}
-              disabled={!pdfDoc || isBusy}
-              title={withShortcutHint(tr("범위 추가", "Add range"), SHORTCUT_LABELS.addRange)}
-            >
-              <span className="btn-content"><ToolbarIcon name="rangeAdd" />{tr("범위 추가", "Add range")}<span className="btn-shortcut">{SHORTCUT_LABELS.addRange}</span></span>
-            </button>
-            <button
-              className="ghost-btn"
               onClick={() => void applyRangeSelection("remove")}
               disabled={!pdfDoc || isBusy}
-              title={withShortcutHint(tr("범위 제외", "Remove range"), SHORTCUT_LABELS.removeRange)}
+              title={withShortcutHint(tr("범위 제거", "Remove range"), showShortcuts ? SHORTCUT_LABELS.removeRange : undefined)}
             >
-              <span className="btn-content"><ToolbarIcon name="rangeRemove" />{tr("범위 제외", "Remove range")}<span className="btn-shortcut">{SHORTCUT_LABELS.removeRange}</span></span>
+              <span className="btn-content"><ToolbarIcon name="rangeRemove" />{tr("범위 제거", "Remove range")}{showShortcuts && <span className="btn-shortcut">{SHORTCUT_LABELS.removeRange}</span>}</span>
             </button>
           </div>
 
@@ -3376,16 +3361,27 @@ function App() {
                 <option value="new">{tr("새창열기", "New window")}</option>
                 <option value="existing">{tr("기존창열기", "Existing window")}</option>
               </select>
+            <label className="inline-field">
+              <span>{tr("단축키", "Shortcuts")}</span>
+              <select
+                value={showShortcuts ? "show" : "hide"}
+                onChange={(event) => setShowShortcuts(event.currentTarget.value === "show")}
+                disabled={isBusy}
+              >
+                <option value="show">{tr("보이기", "Show")}</option>
+                <option value="hide">{tr("안보이기", "Hide")}</option>
+              </select>
+            </label>
             </label>
           <div className="toolbar-line-break" aria-hidden="true" />
 
           <div className="action-group toolbar-block view-block">
-            <button className="ghost-btn" onClick={() => { movePage(-1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage <= 1} title={withShortcutHint(tr("이전", "Previous"), SHORTCUT_LABELS.previousPage)}>{tr("이전", "Previous")}</button>
+            <button className="ghost-btn" onClick={() => { movePage(-1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage <= 1} title={withShortcutHint(tr("이전", "Previous"), showShortcuts ? SHORTCUT_LABELS.previousPage : undefined)}>{tr("이전", "Previous")}</button>
             <label className="inline-field page-field"><span>{tr("페이지", "Page")}</span>
               <input value={pageInput} onChange={(event) => setPageInput(event.currentTarget.value)} onBlur={goToPage} onKeyDown={(event) => { if (event.key === "Enter") goToPage(); }} inputMode="numeric" disabled={!pdfDoc || isBusy} />
             </label>
             <button className="ghost-btn" onClick={() => { goToPage(); focusPreviewArea(); }} disabled={!pdfDoc || isBusy}>{tr("이동", "Go")}</button>
-            <button className="ghost-btn" onClick={() => { movePage(1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage >= pageCount} title={withShortcutHint(tr("다음", "Next"), SHORTCUT_LABELS.nextPage)}>{tr("다음", "Next")}</button>
+            <button className="ghost-btn" onClick={() => { movePage(1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage >= pageCount} title={withShortcutHint(tr("다음", "Next"), showShortcuts ? SHORTCUT_LABELS.nextPage : undefined)}>{tr("다음", "Next")}</button>
           </div>
           <div className="action-group">
             <label className="inline-field zoom-field">
@@ -3439,7 +3435,7 @@ function App() {
               onClick={() => { rotateActivePage(-90); focusPreviewArea(); }}
               disabled={!pdfDoc || isBusy}
               type="button"
-              title={withShortcutHint(tr("왼쪽 회전", "Rotate Left"), SHORTCUT_LABELS.rotateLeft)}
+              title={withShortcutHint(tr("왼쪽 회전", "Rotate Left"), showShortcuts ? SHORTCUT_LABELS.rotateLeft : undefined)}
             >
               {tr("왼쪽 회전", "Rotate Left")}
             </button>
@@ -3448,7 +3444,7 @@ function App() {
               onClick={() => { rotateActivePage(90); focusPreviewArea(); }}
               disabled={!pdfDoc || isBusy}
               type="button"
-              title={withShortcutHint(tr("오른쪽 회전", "Rotate Right"), SHORTCUT_LABELS.rotateRight)}
+              title={withShortcutHint(tr("오른쪽 회전", "Rotate Right"), showShortcuts ? SHORTCUT_LABELS.rotateRight : undefined)}
             >
               {tr("오른쪽 회전", "Rotate Right")}
             </button>
@@ -3810,7 +3806,7 @@ function App() {
                     onClick={showSearchBar ? closeSearchBar : openSearchBar}
                     type="button"
                     disabled={isBusy}
-                    title={withShortcutHint(tr("문서 검색", "Find in document"), SHORTCUT_LABELS.findInDocument)}
+                    title={withShortcutHint(tr("문서 검색", "Find in document"), showShortcuts ? SHORTCUT_LABELS.findInDocument : undefined)}
                   >
                     <ToolbarIcon name="search" />
                     {tr("검색", "Find")}
