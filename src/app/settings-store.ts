@@ -1,5 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export function isTauriRuntime(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean(window.__TAURI__ || window.__TAURI_INTERNALS__);
+}
+
+function createEmptySettingsBundle(): SettingsBundle {
+  return {
+    settings: {},
+    endpoints: [],
+    configDir: "",
+    databasePath: "",
+  };
+}
+
+function isMissingTauriRuntimeError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("__TAURI_INTERNALS__")
+    || message.includes("__TAURI__")
+    || message.includes("webview")
+    || message.includes("not supported in this environment")
+    || message.includes("Cannot read properties of undefined");
+}
+
 export type JsonValue =
   | string
   | number
@@ -142,29 +165,28 @@ export type EndpointModelCatalogResponse = {
 };
 
 export async function loadAppSettings(): Promise<SettingsBundle> {
-  // 로컬 웹 모드에서는 기본 설정 반환
-  if (typeof window === "undefined" || !window.__TAURI__) {
-    return {
-      settings: {},
-      endpoints: [],
-      configDir: "",
-      databasePath: "",
-    };
+  if (typeof window === "undefined") return createEmptySettingsBundle();
+  try {
+    return await invoke<SettingsBundle>("load_app_settings");
+  } catch (error) {
+    if (isMissingTauriRuntimeError(error)) return createEmptySettingsBundle();
+    throw error;
   }
-  return invoke<SettingsBundle>("load_app_settings");
 }
 
 export async function saveAppSettings(settings: Record<string, JsonValue>): Promise<void> {
-  // 로컬 웹 모드에서는 설정 저장 생략
-  if (typeof window === "undefined" || !window.__TAURI__) {
-    return;
+  if (typeof window === "undefined") return;
+  try {
+    await invoke("save_app_settings", { request: { settings } });
+  } catch (error) {
+    if (isMissingTauriRuntimeError(error)) return;
+    throw error;
   }
-  await invoke("save_app_settings", { request: { settings } });
 }
 
 export async function saveChatSession(documentId: string, messages: StoredChatMessage[]): Promise<ChatSessionResponse> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("Chat sessions are not supported in web mode");
   }
   return invoke<ChatSessionResponse>("save_chat_session", { request: { documentId, messages } });
@@ -172,7 +194,7 @@ export async function saveChatSession(documentId: string, messages: StoredChatMe
 
 export async function loadChatSession(documentId: string): Promise<ChatSessionResponse | null> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     return null;
   }
   return invoke<ChatSessionResponse | null>("load_chat_session", { request: { documentId } });
@@ -180,7 +202,7 @@ export async function loadChatSession(documentId: string): Promise<ChatSessionRe
 
 export async function deleteChatSession(documentId: string): Promise<void> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     return;
   }
   await invoke("delete_chat_session", { request: { documentId } });
@@ -188,7 +210,7 @@ export async function deleteChatSession(documentId: string): Promise<void> {
 
 export async function saveAiEndpoint(endpoint: AiEndpoint): Promise<AiEndpoint> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("AI endpoints are not supported in web mode");
   }
   return invoke<AiEndpoint>("save_ai_endpoint", { endpoint });
@@ -196,7 +218,7 @@ export async function saveAiEndpoint(endpoint: AiEndpoint): Promise<AiEndpoint> 
 
 export async function deleteAiEndpoint(endpointId: string): Promise<void> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     return;
   }
   await invoke("delete_ai_endpoint", { request: { endpointId } });
@@ -204,7 +226,7 @@ export async function deleteAiEndpoint(endpointId: string): Promise<void> {
 
 export async function testAiEndpoint(endpoint: AiEndpoint): Promise<EndpointTestResponse> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("AI endpoint testing is not supported in web mode");
   }
   return invoke<EndpointTestResponse>("test_ai_endpoint", { endpoint });
@@ -212,7 +234,7 @@ export async function testAiEndpoint(endpoint: AiEndpoint): Promise<EndpointTest
 
 export async function getEndpointModelCatalog(endpoint: AiEndpoint): Promise<EndpointModelCatalogResponse> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("Model catalog is not supported in web mode");
   }
   return invoke<EndpointModelCatalogResponse>("get_endpoint_model_catalog", { endpoint });
@@ -220,7 +242,7 @@ export async function getEndpointModelCatalog(endpoint: AiEndpoint): Promise<End
 
 export async function indexPdfDocument(request: IndexPdfDocumentRequest): Promise<IndexPdfDocumentResponse> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("PDF indexing is not supported in web mode");
   }
   return invoke<IndexPdfDocumentResponse>("index_pdf_document", { request });
@@ -228,7 +250,7 @@ export async function indexPdfDocument(request: IndexPdfDocumentRequest): Promis
 
 export async function chatWithPdf(request: ChatWithPdfRequest): Promise<ChatWithPdfResponse> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("PDF chat is not supported in web mode");
   }
   return invoke<ChatWithPdfResponse>("chat_with_pdf", { request });
@@ -236,7 +258,7 @@ export async function chatWithPdf(request: ChatWithPdfRequest): Promise<ChatWith
 
 export async function compactChatHistory(request: CompactChatHistoryRequest): Promise<CompactChatHistoryResponse> {
   // 로컬 웹 모드에서는 지원하지 않음
-  if (typeof window === "undefined" || !window.__TAURI__) {
+  if (!isTauriRuntime()) {
     throw new Error("Chat history compaction is not supported in web mode");
   }
   return invoke<CompactChatHistoryResponse>("compact_chat_history", { request });

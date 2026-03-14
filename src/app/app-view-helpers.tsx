@@ -89,9 +89,7 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export function readStoredZoom(): number {
-  const raw = window.localStorage.getItem("app.previewZoom");
-  const parsed = raw ? Number.parseInt(raw, 10) : 100;
-  return clamp(Number.isFinite(parsed) ? parsed : 100, ZOOM_MIN, ZOOM_MAX);
+  return clamp(100, ZOOM_MIN, ZOOM_MAX);
 }
 
 export const PAGE_LOAD_BATCH_SIZE = 24;

@@ -85,8 +85,6 @@ export type PreviewSelectionRect = {
 };
 
 export function detectLocale(): Locale {
-  const saved = window.localStorage.getItem("app.locale");
-  if (saved === "ko" || saved === "en") return saved;
   return window.navigator.language.toLowerCase().startsWith("ko") ? "ko" : "en";
 }
 

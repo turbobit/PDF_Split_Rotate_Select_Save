@@ -88,7 +88,7 @@ import {
   type SidebarTab,
   type StatusState,
 } from "./app/app-helpers";
-import { loadAppSettings, saveAppSettings } from "./app/settings-store";
+import { isTauriRuntime, loadAppSettings, saveAppSettings } from "./app/settings-store";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
@@ -98,6 +98,22 @@ const AiChatPanel = lazy(() => import("./components/AiChatPanel"));
 type InspectPdfSecurityResponse = {
   isEncrypted: boolean;
 };
+
+type PersistedAppSettings = {
+  "app.locale": Locale;
+  "app.toolbarCollapsed": boolean;
+  "app.previewZoom": number;
+  "app.previewZoomMode": "fit" | "manual";
+  "app.previewSpreadMode": boolean;
+  "app.openExplorerAfterSave": boolean;
+  "app.openPdfInNewWindow": boolean;
+  "app.showShortcuts": boolean;
+  "ai.panelOpen": boolean;
+};
+
+function buildPersistedAppSettings(input: PersistedAppSettings): PersistedAppSettings {
+  return input;
+}
 
 function App() {
   const [locale, setLocale] = useState<Locale>(detectLocale);
@@ -146,7 +162,7 @@ function App() {
   const [isLoadingPdfInfo, setIsLoadingPdfInfo] = useState(false);
   const [pdfInfoMetadataFields, setPdfInfoMetadataFields] = useState<PdfInfoField[]>([]);
   const [pdfInfoFontNames, setPdfInfoFontNames] = useState<string[]>([]);
-  const [isToolbarCollapsed, setIsToolbarCollapsed] = useState<boolean>(() => window.localStorage.getItem("app.toolbarCollapsed") === "1");
+  const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false);
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [hasHydratedStoredSettings, setHasHydratedStoredSettings] = useState(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
@@ -170,8 +186,8 @@ function App() {
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const [isSearchingDocument, setIsSearchingDocument] = useState(false);
   const [previewZoom, setPreviewZoom] = useState(readStoredZoom);
-  const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "manual">(() => (window.localStorage.getItem("app.previewZoomMode") === "manual" ? "manual" : "fit"));
-  const [previewSpreadMode, setPreviewSpreadMode] = useState<boolean>(() => window.localStorage.getItem("app.previewSpreadMode") === "1");
+  const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "manual">("fit");
+  const [previewSpreadMode, setPreviewSpreadMode] = useState(false);
   const [pageRotations, setPageRotations] = useState<Record<number, number>>({});
   const [isPreviewFocused, setIsPreviewFocused] = useState(false);
   const [isInitialPreviewReady, setIsInitialPreviewReady] = useState(false);
@@ -233,6 +249,7 @@ function App() {
   const secondaryPreviewPageNumberRef = useRef<number | null>(null);
   const previewRenderGenerationRef = useRef(0);
   const hasPrefetchedPdfInfoRef = useRef(false);
+  const persistedSettingsRef = useRef<PersistedAppSettings | null>(null);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -310,6 +327,28 @@ function App() {
     return tr("이미지 저장 실패", "Image save failed");
   }, [status, tr]);
 
+  const currentPersistedSettings = useMemo(() => buildPersistedAppSettings({
+    "app.locale": locale,
+    "app.toolbarCollapsed": isToolbarCollapsed,
+    "app.previewZoom": previewZoom,
+    "app.previewZoomMode": previewZoomMode,
+    "app.previewSpreadMode": previewSpreadMode,
+    "app.openExplorerAfterSave": openExplorerAfterSave,
+    "app.openPdfInNewWindow": openPdfInNewWindow,
+    "app.showShortcuts": showShortcuts,
+    "ai.panelOpen": showAiPanel,
+  }), [
+    isToolbarCollapsed,
+    locale,
+    openExplorerAfterSave,
+    openPdfInNewWindow,
+    previewSpreadMode,
+    previewZoom,
+    previewZoomMode,
+    showAiPanel,
+    showShortcuts,
+  ]);
+
   useEffect(() => {
     let cancelled = false;
     void loadAppSettings()
@@ -339,6 +378,17 @@ function App() {
         if (typeof storedOpenPdfInNewWindow === "boolean") setOpenPdfInNewWindow(storedOpenPdfInNewWindow);
         if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
+        persistedSettingsRef.current = buildPersistedAppSettings({
+          "app.locale": storedLocale === "ko" || storedLocale === "en" ? storedLocale : locale,
+          "app.toolbarCollapsed": typeof storedToolbarCollapsed === "boolean" ? storedToolbarCollapsed : false,
+          "app.previewZoom": typeof storedPreviewZoom === "number" ? clamp(Math.round(storedPreviewZoom), ZOOM_MIN, ZOOM_MAX) : 100,
+          "app.previewZoomMode": storedPreviewZoomMode === "fit" || storedPreviewZoomMode === "manual" ? storedPreviewZoomMode : "fit",
+          "app.previewSpreadMode": typeof storedPreviewSpreadMode === "boolean" ? storedPreviewSpreadMode : false,
+          "app.openExplorerAfterSave": typeof storedOpenExplorerAfterSave === "boolean" ? storedOpenExplorerAfterSave : true,
+          "app.openPdfInNewWindow": typeof storedOpenPdfInNewWindow === "boolean" ? storedOpenPdfInNewWindow : true,
+          "app.showShortcuts": typeof storedShowShortcuts === "boolean" ? storedShowShortcuts : false,
+          "ai.panelOpen": typeof storedAiPanelOpen === "boolean" ? storedAiPanelOpen : false,
+        });
         setHasHydratedStoredSettings(true);
       })
       .catch((error) => {
@@ -352,33 +402,22 @@ function App() {
 
   useEffect(() => {
     if (!hasHydratedStoredSettings) return;
-    const timerId = window.setTimeout(() => {
-      void saveAppSettings({
-        "app.locale": locale,
-        "app.toolbarCollapsed": isToolbarCollapsed,
-        "app.previewZoom": previewZoom,
-        "app.previewZoomMode": previewZoomMode,
-        "app.previewSpreadMode": previewSpreadMode,
-        "app.openExplorerAfterSave": openExplorerAfterSave,
-        "app.openPdfInNewWindow": openPdfInNewWindow,
-        "app.showShortcuts": showShortcuts,
-        "ai.panelOpen": showAiPanel,
-      }).catch((error) => {
-        setErrorText(`${tr("앱 설정 저장 실패", "Failed to save app settings")}: ${formatError(error)}`);
-      });
-    }, 140);
-    return () => window.clearTimeout(timerId);
+    const previous = persistedSettingsRef.current;
+    const changedEntries = Object.entries(currentPersistedSettings).filter(([key, value]) => previous?.[key as keyof PersistedAppSettings] !== value);
+    if (changedEntries.length === 0) return;
+
+    const changedSettings = Object.fromEntries(changedEntries) as Record<string, string | number | boolean>;
+    void saveAppSettings(changedSettings).then(() => {
+      persistedSettingsRef.current = {
+        ...(persistedSettingsRef.current ?? currentPersistedSettings),
+        ...currentPersistedSettings,
+      };
+    }).catch((error) => {
+      setErrorText(`${tr("앱 설정 저장 실패", "Failed to save app settings")}: ${formatError(error)}`);
+    });
   }, [
+    currentPersistedSettings,
     hasHydratedStoredSettings,
-    isToolbarCollapsed,
-    locale,
-    openExplorerAfterSave,
-    openPdfInNewWindow,
-    showShortcuts,
-    previewSpreadMode,
-    previewZoom,
-    previewZoomMode,
-    showAiPanel,
     tr,
   ]);
 
@@ -443,7 +482,7 @@ function App() {
 
   useEffect(() => {
     // Tauri 환경에서만 창 표시
-    if (typeof window !== "undefined" && window.__TAURI__) {
+    if (isTauriRuntime()) {
       void getCurrentWindow().show().catch(() => {
         // Ignore if the window is already visible.
       });
@@ -1666,7 +1705,7 @@ function App() {
     }
 
     // Tauri 환경에서만 추가 작업 수행
-    if (typeof window !== "undefined" && window.__TAURI__) {
+    if (isTauriRuntime()) {
       void (async () => {
         try {
           const pendingPath = await invoke<string | null>("take_next_pending_pdf_path");
@@ -1691,7 +1730,7 @@ function App() {
 
   useEffect(() => {
     // Tauri 환경에서만 드래그 앤 드롭 이벤트 리스너 등록
-    if (typeof window === "undefined" || !window.__TAURI__) return;
+    if (!isTauriRuntime()) return;
 
     let unlisten: (() => void) | null = null;
     void getCurrentWindow().onDragDropEvent((event) => {
