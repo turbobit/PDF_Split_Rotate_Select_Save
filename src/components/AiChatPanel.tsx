@@ -47,6 +47,7 @@ type AiChatPanelProps = {
   pdfBytes: Uint8Array | null;
   pdfPath: string | null;
   isBusy: boolean;
+  canPrepareIndex?: boolean;
   onJumpToCitation?: (snippet: RetrievedSnippet) => void;
 };
 
@@ -319,12 +320,19 @@ function AiCodeBlock({
   );
 }
 
-export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJumpToCitation }: AiChatPanelProps) {
+export default function AiChatPanel({
+  tr,
+  pdfDoc,
+  pdfBytes,
+  pdfPath,
+  isBusy,
+  canPrepareIndex = true,
+  onJumpToCitation,
+}: AiChatPanelProps) {
   const [databasePath, setDatabasePath] = useState("");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showIndexCard, setShowIndexCard] = useState(true);
   const [endpoints, setEndpoints] = useState<AiEndpoint[]>([]);
   const [selectedEndpointId, setSelectedEndpointId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
@@ -364,6 +372,31 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     () => compactHomePath(databasePath),
     [databasePath],
   );
+  const indexStatusLabel = useMemo(() => {
+    if (isIndexing) return tr("인덱싱 중", "Indexing");
+    if (indexStatus.trim().length === 0) return tr("인덱스 대기", "Index idle");
+    if (indexStatus.includes("BM25 +")) return tr("BM25+벡터 준비 완료 ?", "BM25+vector ready ?");
+    if (indexStatus.includes("BM25")) return tr("BM25 준비 완료 ?", "BM25 ready ?");
+    return indexStatus;
+  }, [indexStatus, isIndexing, tr]);
+  const indexStatusTooltip = useMemo(() => {
+    const lines = [
+      tr("문서 인덱스", "Document Index"),
+      `${tr("상태", "Status")}: ${indexStatusLabel}`,
+      `${tr("마지막", "Last")}: ${formatIndexedAt(indexState?.lastIndexedAt)}`,
+      `${tr("재사용", "Reuse")}: ${
+        indexState
+          ? (indexState.reusedExisting
+            ? tr("기존 인덱스 재사용", "Reused existing index")
+            : tr("새로 생성됨", "Newly created"))
+          : "-"
+      }`,
+      `${tr("검색 모드", "Search Mode")}: ${indexState?.searchMode ?? "-"}`,
+      `${tr("청크 수", "Chunks")}: ${indexState?.chunkCount ?? 0}`,
+      `${tr("선택 서비스", "Selected Service")}: ${activeEndpoint?.label ?? tr("없음", "None")}`,
+    ];
+    return lines.join("\n");
+  }, [activeEndpoint?.label, indexState, indexStatusLabel, tr]);
 
   useEffect(() => {
     let cancelled = false;
@@ -371,7 +404,6 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
       .then((bundle) => {
         if (cancelled) return;
         const storedEndpointId = readString(bundle.settings["ai.selectedEndpointId"]);
-        const storedIndexCardOpen = readBoolean(bundle.settings["ai.indexCardOpen"]);
         setDatabasePath(bundle.databasePath);
         setEndpoints(bundle.endpoints);
         setExpandedEndpointIds((previous) => {
@@ -382,7 +414,6 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
           return initial.length > 0 ? initial : bundle.endpoints.slice(0, 1).map((endpoint) => endpoint.id);
         });
         setAiEnabled(readBoolean(bundle.settings["ai.enabled"]) ?? false);
-        setShowIndexCard(storedIndexCardOpen ?? true);
         const fallbackEndpoint = bundle.endpoints.find((endpoint) => endpoint.isDefault) ?? null;
         setSelectedEndpointId(storedEndpointId ?? fallbackEndpoint?.id ?? null);
         setSettingsLoaded(true);
@@ -412,14 +443,13 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     const timerId = window.setTimeout(() => {
       void saveAppSettings({
         "ai.enabled": aiEnabled,
-        "ai.indexCardOpen": showIndexCard,
         "ai.selectedEndpointId": selectedEndpointId ?? "",
       }).catch((error) => {
         setPanelError(`${tr("AI 설정 저장 실패", "Failed to save AI settings")}: ${formatError(error)}`);
       });
     }, 140);
     return () => window.clearTimeout(timerId);
-  }, [aiEnabled, selectedEndpointId, settingsLoaded, showIndexCard, tr]);
+  }, [aiEnabled, selectedEndpointId, settingsLoaded, tr]);
 
   useEffect(() => {
     if (!messagesViewportRef.current) return;
@@ -435,7 +465,7 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     setMessageStatus(null);
     setCurrentDocumentId(null);
     setLoadedSessionDocumentId(null);
-    if (!pdfBytes) {
+    if (!pdfBytes || !canPrepareIndex) {
       return;
     }
     let cancelled = false;
@@ -459,28 +489,29 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     return () => {
       cancelled = true;
     };
-  }, [pdfBytes, pdfPath, tr]);
+  }, [canPrepareIndex, pdfBytes, pdfPath, tr]);
 
   useEffect(() => {
     if (!currentDocumentId || loadedSessionDocumentId !== currentDocumentId) return;
-    const timerId = window.setTimeout(() => {
-      if (messages.length === 0) {
-        void deleteChatSession(currentDocumentId).catch((error) => {
-          setPanelError(`${tr("대화 세션 삭제 실패", "Failed to delete chat session")}: ${formatError(error)}`);
-        });
-        return;
-      }
-      void saveChatSession(currentDocumentId, messages).catch((error) => {
-        setPanelError(`${tr("대화 세션 저장 실패", "Failed to save chat session")}: ${formatError(error)}`);
+    if (messages.length === 0) {
+      void deleteChatSession(currentDocumentId).catch((error) => {
+        setPanelError(`${tr("대화 세션 삭제 실패", "Failed to delete chat session")}: ${formatError(error)}`);
       });
-    }, 220);
-    return () => window.clearTimeout(timerId);
+      return;
+    }
+    void saveChatSession(currentDocumentId, messages).catch((error) => {
+      setPanelError(`${tr("대화 세션 저장 실패", "Failed to save chat session")}: ${formatError(error)}`);
+    });
   }, [currentDocumentId, loadedSessionDocumentId, messages, tr]);
 
   const prepareIndex = useCallback(async (forceRebuild = false) => {
     if (!aiEnabled) {
       setIndexState(null);
       setIndexStatus(tr("AI 기능이 꺼져 있습니다.", "AI features are turned off."));
+      return false;
+    }
+    if (!canPrepareIndex) {
+      setIndexStatus(tr("첫 페이지 표시 후 AI 인덱스를 준비합니다.", "AI index starts after the first page is shown."));
       return false;
     }
     if (!pdfDoc || !pdfBytes) {
@@ -557,10 +588,10 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     } finally {
       setIsIndexing(false);
     }
-  }, [activeEndpoint, aiEnabled, indexState?.documentId, pdfBytes, pdfDoc, pdfPath, tr]);
+  }, [activeEndpoint, aiEnabled, canPrepareIndex, indexState?.documentId, pdfBytes, pdfDoc, pdfPath, tr]);
 
   useEffect(() => {
-    if (showSettings) return;
+    if (showSettings || !canPrepareIndex) return;
     let cancelled = false;
     void (async () => {
       const ok = await prepareIndex(false);
@@ -570,7 +601,7 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     return () => {
       cancelled = true;
     };
-  }, [prepareIndex, showSettings]);
+  }, [canPrepareIndex, prepareIndex, showSettings]);
 
   const updateEndpoint = useCallback((endpointId: string, patch: Partial<AiEndpoint>) => {
     setEndpoints((previous) => previous.map((endpoint) => (endpoint.id === endpointId ? { ...endpoint, ...patch } : endpoint)));
@@ -734,11 +765,12 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     if (!activeEndpoint) return tr("AI 엔드포인트를 선택하세요.", "Choose an AI endpoint.");
     if (!activeEndpoint.enabled) return tr("선택한 엔드포인트가 비활성화되어 있습니다.", "Selected endpoint is disabled.");
     if (activeEndpoint.chatModel.trim().length === 0) return tr("채팅 모델 이름을 설정하세요.", "Set a chat model name.");
+    if (!canPrepareIndex) return tr("첫 페이지 표시가 끝나면 AI 인덱스를 준비합니다.", "AI index starts after the first page is shown.");
     if (isIndexing) return tr("문서 인덱스를 준비 중입니다.", "Document index is still being prepared.");
     if (!indexState?.documentId) return tr("문서 인덱스가 아직 없습니다.", "Document index is not ready yet.");
     if (isBusy) return tr("PDF 작업이 끝난 뒤 다시 시도하세요.", "Try again after the PDF task finishes.");
     return null;
-  }, [activeEndpoint, aiEnabled, indexState?.documentId, isBusy, isIndexing, pdfBytes, pdfDoc, tr]);
+  }, [activeEndpoint, aiEnabled, canPrepareIndex, indexState?.documentId, isBusy, isIndexing, pdfBytes, pdfDoc, tr]);
 
   const registeredEndpoints = useMemo(
     () => [...endpoints].sort((left, right) => {
@@ -892,8 +924,17 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
     <aside className="panel ai-panel">
       <div className="ai-panel-head">
         <div className="ai-panel-head-meta">
-          <strong>{tr("AI대화", "AI Chat")}</strong>
-          <p>{compactDatabasePath || tr("SQLite 설정 DB 준비 중...", "Preparing SQLite settings DB...")}</p>
+          <div className="ai-panel-head-title-row">
+            <strong>{tr("AI대화", "AI Chat")}</strong>
+            <span
+              className={`ai-index-pill ${isIndexing ? "busy" : ""}`}
+              title={indexStatusTooltip}
+              aria-label={indexStatusTooltip}
+            >
+              {indexStatusLabel}
+            </span>
+          </div>
+          <p>{compactDatabasePath || tr("SQLite 설정 DB 준비중...", "Preparing SQLite settings DB...")}</p>
         </div>
         <label className="ai-power-toggle">
           <span>{aiEnabled ? "ON" : "OFF"}</span>
@@ -1260,53 +1301,6 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
           </div>
         </div>
       ) : null}
-
-      <section className={`ai-status-card ${showIndexCard ? "expanded" : "collapsed"}`}>
-        <button
-          className="ai-status-card-toggle"
-          type="button"
-          onClick={() => setShowIndexCard((previous) => !previous)}
-        >
-          <span className="ai-status-card-title">
-            <strong>{tr("문서 인덱스", "Document Index")}</strong>
-            <span>{indexStatus || tr("대기 중", "Idle")}</span>
-          </span>
-          <span className="ai-status-card-toggle-label">
-            {showIndexCard ? tr("접기", "Collapse") : tr("펼치기", "Expand")}
-          </span>
-        </button>
-        {showIndexCard ? (
-          <div className="ai-status-card-body">
-            <button
-              className="ai-status-action ai-status-panel"
-              type="button"
-              onClick={() => void prepareIndex(true)}
-              disabled={!aiEnabled || !pdfDoc || !pdfBytes || isIndexing}
-              title={tr("클릭하면 문서 인덱스를 다시 생성합니다.", "Click to rebuild the document index.")}
-            >
-              <strong>{tr("문서 인덱스", "Document Index")}</strong>
-              <span>{tr("마지막", "Last")}: {formatIndexedAt(indexState?.lastIndexedAt)}</span>
-              <span>
-                {tr("재사용", "Reuse")}: {indexState ? (indexState.reusedExisting ? tr("기존 인덱스 사용", "Reused existing index") : tr("새로 생성됨", "Rebuilt")) : "-"}
-              </span>
-            </button>
-            <div className="ai-status-summary">
-              <span className="ai-status-chip">
-                <strong>{tr("검색 모드", "Search Mode")}</strong>
-                <span>{indexState?.searchMode ?? "-"}</span>
-              </span>
-              <span className="ai-status-chip">
-                <strong>{tr("청크 수", "Chunks")}</strong>
-                <span>{indexState?.chunkCount ?? 0}</span>
-              </span>
-              <span className="ai-status-chip ai-status-chip-service">
-                <strong>{tr("선택 서비스", "Selected Service")}</strong>
-                <span>{activeEndpoint?.label ?? tr("없음", "None")}</span>
-              </span>
-            </div>
-          </div>
-        ) : null}
-      </section>
 
       {panelError ? <div className="panel error-banner ai-error-banner">{panelError}</div> : null}
       {messageStatus ? <div className="ai-inline-note">{messageStatus}</div> : null}
