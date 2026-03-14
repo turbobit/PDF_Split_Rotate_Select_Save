@@ -1591,13 +1591,10 @@ fn prepare_runtime_endpoint(
     mut endpoint: AiEndpoint,
 ) -> anyhow::Result<AiEndpoint> {
     endpoint = sanitize_endpoint(endpoint)?;
-    if endpoint.api_key.is_none() {
-        endpoint.api_key = match endpoint_api_key_storage(&endpoint.extra_json) {
-            API_KEY_STORAGE_DATABASE => load_saved_api_key_anywhere(state, &endpoint.id)?,
-            _ => load_api_key_from_secret_store(&endpoint.id)?,
-        };
-    }
-    endpoint.has_api_key = endpoint.api_key.is_some();
+    let had_saved_api_key_hint = endpoint.has_api_key;
+    let typed_api_key = endpoint.api_key.clone();
+    endpoint.api_key = load_saved_api_key_anywhere(state, &endpoint.id)?.or(typed_api_key);
+    endpoint.has_api_key = endpoint.api_key.is_some() || had_saved_api_key_hint;
     endpoint.clear_api_key = false;
     Ok(endpoint)
 }
@@ -1696,6 +1693,25 @@ fn gemini_embed_url(base_url: &str, model: &str) -> String {
     format!("{base}/models/{model}:embedContent")
 }
 
+fn missing_api_key_error(endpoint: &AiEndpoint) -> anyhow::Error {
+    let storage = endpoint_api_key_storage(&endpoint.extra_json);
+    if endpoint.has_api_key {
+        if storage == API_KEY_STORAGE_DATABASE {
+            anyhow!(
+                "saved API key for {} could not be loaded from SQLite DB; save the endpoint again",
+                endpoint.label
+            )
+        } else {
+            anyhow!(
+                "saved API key for {} could not be loaded from the OS keychain; save the key again or switch storage to SQLite DB",
+                endpoint.label
+            )
+        }
+    } else {
+        anyhow!("API key is required for {}", endpoint.label)
+    }
+}
+
 fn maybe_api_key(endpoint: &AiEndpoint) -> anyhow::Result<Option<String>> {
     if let Some(value) = endpoint
         .api_key
@@ -1713,7 +1729,7 @@ fn maybe_api_key(endpoint: &AiEndpoint) -> anyhow::Result<Option<String>> {
 }
 
 fn require_api_key(endpoint: &AiEndpoint) -> anyhow::Result<String> {
-    maybe_api_key(endpoint)?.with_context(|| format!("API key is required for {}", endpoint.label))
+    maybe_api_key(endpoint)?.ok_or_else(|| missing_api_key_error(endpoint))
 }
 
 async fn send_json_request(
@@ -2002,7 +2018,9 @@ async fn get_endpoint_model_catalog_inner(
 
     let (remote_chat, remote_embedding) = match endpoint.provider.as_str() {
         "openai" | "litellm" | "lmstudio" => {
-            let models = fetch_openai_like_model_ids(&state.http, &endpoint).await?;
+            let models = fetch_openai_like_model_ids(&state.http, &endpoint)
+                .await
+                .with_context(|| format!("failed to fetch chat/embedding model catalog for {}", endpoint.label))?;
             let embedding_models = dedupe_models(
                 models
                     .iter()
@@ -2023,7 +2041,9 @@ async fn get_endpoint_model_catalog_inner(
             (chat_models, embedding_models)
         }
         "ollama" => {
-            let models = fetch_ollama_model_ids(&state.http, &endpoint).await?;
+            let models = fetch_ollama_model_ids(&state.http, &endpoint)
+                .await
+                .with_context(|| format!("failed to fetch model catalog for {}", endpoint.label))?;
             let embedding_models = dedupe_models(
                 models
                     .iter()
@@ -2041,16 +2061,22 @@ async fn get_endpoint_model_catalog_inner(
             (chat_models, embedding_models)
         }
         "anthropic" => (
-            fetch_anthropic_model_ids(&state.http, &endpoint).await?,
+            fetch_anthropic_model_ids(&state.http, &endpoint)
+                .await
+                .with_context(|| format!("failed to fetch chat model catalog for {}", endpoint.label))?,
             Vec::new(),
         ),
-        "gemini" => fetch_gemini_model_catalog(&state.http, &endpoint).await?,
+        "gemini" => fetch_gemini_model_catalog(&state.http, &endpoint)
+            .await
+            .with_context(|| format!("failed to fetch chat/embedding model catalog for {}", endpoint.label))?,
         _ => (Vec::new(), Vec::new()),
     };
 
-    let chat_models = dedupe_models([remote_chat.clone(), fallback_chat.clone()].concat());
-    let embedding_models =
+    let mut chat_models = dedupe_models([remote_chat.clone(), fallback_chat.clone()].concat());
+    let mut embedding_models =
         dedupe_models([remote_embedding.clone(), fallback_embedding.clone()].concat());
+    chat_models.sort_by_cached_key(|model| model.to_lowercase());
+    embedding_models.sort_by_cached_key(|model| model.to_lowercase());
 
     let provider = endpoint.provider.clone();
 
@@ -2517,7 +2543,9 @@ async fn test_ai_endpoint_inner(
     let endpoint = prepare_runtime_endpoint(state, endpoint)?;
     let has_api_key = maybe_api_key(&endpoint)?.is_some();
 
-    test_chat_endpoint(&state.http, &endpoint).await?;
+    test_chat_endpoint(&state.http, &endpoint)
+        .await
+        .with_context(|| format!("chat model connectivity test failed for {}", endpoint.label))?;
 
     let mut checked_embeddings = false;
     if provider_supports_embeddings(&endpoint.provider) {
@@ -2527,7 +2555,9 @@ async fn test_ai_endpoint_inner(
                 endpoint.label
             ));
         }
-        let _ = embed_texts_for_endpoint(&state.http, &endpoint, &[String::from("ping")]).await?;
+        let _ = embed_texts_for_endpoint(&state.http, &endpoint, &[String::from("ping")])
+            .await
+            .with_context(|| format!("embedding model connectivity test failed for {}", endpoint.label))?;
         checked_embeddings = true;
     }
 
@@ -2976,7 +3006,7 @@ pub fn run() {
             config_dir,
             database_path,
             http: reqwest::Client::builder()
-                .user_agent("PDF_Split_Rotate_Select_Save/0.1.6")
+                .user_agent("PDF_Split_Rotate_Select_Save/0.1.8")
                 .build()
                 .expect("failed to build HTTP client"),
         })
