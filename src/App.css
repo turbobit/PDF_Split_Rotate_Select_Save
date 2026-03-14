@@ -512,7 +512,7 @@ body.workspace-resizing {
   transition: background 140ms ease, width 140ms ease;
 }
 
-.panel-resize-handle:hover::after,
+.panel-resize-handle[data-active="true"]::after,
 body.workspace-resizing .panel-resize-handle::after {
   width: 4px;
   background: rgba(91, 76, 57, 0.46);

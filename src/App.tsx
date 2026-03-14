@@ -279,6 +279,7 @@ function App() {
   const [securityModalError, setSecurityModalError] = useState<string | null>(null);
   const [pendingProtectedPdfPath, setPendingProtectedPdfPath] = useState<string | null>(null);
   const [workspaceViewportWidth, setWorkspaceViewportWidth] = useState(() => window.innerWidth);
+  const [activeResizeHandle, setActiveResizeHandle] = useState<"sidebar" | "ai" | null>(null);
   const isE2EMode = useMemo(() => {
     if (import.meta.env.MODE === "e2e") return true;
     return new URLSearchParams(window.location.search).has("e2e");
@@ -343,8 +344,13 @@ function App() {
   const splitDragStateRef = useRef<{
     kind: "sidebar" | "ai";
     pointerId: number;
+    handle: HTMLDivElement | null;
   } | null>(null);
   const draggingPageIndexRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const pendingResizeClientXRef = useRef<number | null>(null);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const aiPanelWidthRef = useRef(aiPanelWidth);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -460,6 +466,14 @@ function App() {
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
   }, [activeTabId]);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    aiPanelWidthRef.current = aiPanelWidth;
+  }, [aiPanelWidth]);
 
   const buildWorkspaceSnapshot = useCallback((): WorkspaceTabSnapshot | null => {
     if (!pdfBytes) return null;
@@ -678,42 +692,72 @@ function App() {
   }, [isStackedWorkspace, showAiPanel, sidebarWidth, workspaceViewportWidth]);
 
   useEffect(() => {
-    const dragState = splitDragStateRef.current;
-    if (!dragState || isStackedWorkspace) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      if (event.pointerId !== dragState.pointerId) return;
+    const commitResize = () => {
+      resizeFrameRef.current = null;
+      const dragState = splitDragStateRef.current;
+      const clientX = pendingResizeClientXRef.current;
+      if (!dragState || clientX === null || isStackedWorkspace) return;
       const workspaceRect = workspaceRef.current?.getBoundingClientRect();
       if (!workspaceRect) return;
       if (dragState.kind === "sidebar") {
-        const nextWidth = event.clientX - workspaceRect.left;
-        setSidebarWidth(clampWorkspaceSidebarWidth(nextWidth, workspaceRect.width, showAiPanel));
+        const nextWidth = clampWorkspaceSidebarWidth(clientX - workspaceRect.left, workspaceRect.width, showAiPanel);
+        if (nextWidth !== sidebarWidthRef.current) setSidebarWidth(nextWidth);
         return;
       }
-      const nextWidth = workspaceRect.right - event.clientX;
-      setAiPanelWidth(clampWorkspaceAiWidth(nextWidth, workspaceRect.width, sidebarWidth));
+      const nextWidth = clampWorkspaceAiWidth(workspaceRect.right - clientX, workspaceRect.width, sidebarWidthRef.current);
+      if (nextWidth !== aiPanelWidthRef.current) setAiPanelWidth(nextWidth);
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = splitDragStateRef.current;
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+      pendingResizeClientXRef.current = event.clientX;
+      if (resizeFrameRef.current !== null) return;
+      resizeFrameRef.current = window.requestAnimationFrame(commitResize);
+    };
+
+    const finishResize = (pointerId: number) => {
+      const dragState = splitDragStateRef.current;
+      if (!dragState || dragState.pointerId !== pointerId) return;
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+      commitResize();
+      dragState.handle?.releasePointerCapture(pointerId);
+      splitDragStateRef.current = null;
+      pendingResizeClientXRef.current = null;
+      setActiveResizeHandle(null);
+      document.body.classList.remove("workspace-resizing");
     };
 
     const handlePointerUp = (event: PointerEvent) => {
-      if (event.pointerId !== dragState.pointerId) return;
-      splitDragStateRef.current = null;
-      document.body.classList.remove("workspace-resizing");
+      finishResize(event.pointerId);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", handlePointerUp);
     return () => {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerUp);
+      pendingResizeClientXRef.current = null;
+      splitDragStateRef.current = null;
+      setActiveResizeHandle(null);
       document.body.classList.remove("workspace-resizing");
     };
-  }, [isStackedWorkspace, showAiPanel, sidebarWidth]);
+  }, [isStackedWorkspace, showAiPanel]);
 
   const beginWorkspaceResize = useCallback((kind: "sidebar" | "ai", event: React.PointerEvent<HTMLDivElement>) => {
     if (isStackedWorkspace) return;
-    splitDragStateRef.current = { kind, pointerId: event.pointerId };
+    splitDragStateRef.current = { kind, pointerId: event.pointerId, handle: event.currentTarget };
+    pendingResizeClientXRef.current = event.clientX;
+    setActiveResizeHandle(kind);
     document.body.classList.add("workspace-resizing");
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -4911,6 +4955,7 @@ function App() {
         {!isStackedWorkspace ? (
           <div
             className="panel-resize-handle"
+            data-active={activeResizeHandle === "sidebar" ? "true" : "false"}
             role="separator"
             aria-label={tr("왼쪽 사이드바 너비 조절", "Resize left sidebar")}
             aria-orientation="vertical"
@@ -5114,6 +5159,7 @@ function App() {
         {showAiPanel && !isStackedWorkspace ? (
           <div
             className="panel-resize-handle"
+            data-active={activeResizeHandle === "ai" ? "true" : "false"}
             role="separator"
             aria-label={tr("오른쪽 AI 패널 너비 조절", "Resize AI panel")}
             aria-orientation="vertical"
