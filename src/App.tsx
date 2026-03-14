@@ -128,12 +128,14 @@ type PersistedAppSettings = {
   "app.locale": Locale;
   "app.toolbarCollapsed": boolean;
   "app.sidebarTab": SidebarTab;
+  "app.sidebarWidth": number;
   "app.previewZoom": number;
   "app.previewZoomMode": "fit" | "manual";
   "app.previewSpreadMode": boolean;
   "app.openExplorerAfterSave": boolean;
   "app.showShortcuts": boolean;
   "ai.panelOpen": boolean;
+  "ai.panelWidth": number;
 };
 
 type AppE2EBridge = {
@@ -143,9 +145,33 @@ type AppE2EBridge = {
 const PAGE_TEXT_SEARCH_CACHE_LIMIT = 24;
 const SEARCH_PROGRESS_YIELD_EVERY_PAGES = 2;
 const FONT_INFO_YIELD_EVERY_PAGES = 2;
+const DEFAULT_SIDEBAR_WIDTH = 300;
+const DEFAULT_AI_PANEL_WIDTH = 420;
+const WORKSPACE_SPLIT_HANDLE_WIDTH = 10;
+const WORKSPACE_GRID_GAP = 8;
+const MIN_SIDEBAR_WIDTH = 220;
+const MIN_AI_PANEL_WIDTH = 280;
+const MIN_PREVIEW_PANEL_WIDTH = 360;
+const STACKED_WORKSPACE_BREAKPOINT = 1080;
 
 function buildPersistedAppSettings(input: PersistedAppSettings): PersistedAppSettings {
   return input;
+}
+
+function clampWorkspaceSidebarWidth(width: number, totalWidth: number, withAi: boolean): number {
+  const reservedWidth = MIN_PREVIEW_PANEL_WIDTH
+    + WORKSPACE_SPLIT_HANDLE_WIDTH
+    + WORKSPACE_GRID_GAP * 2
+    + (withAi ? MIN_AI_PANEL_WIDTH + WORKSPACE_SPLIT_HANDLE_WIDTH + WORKSPACE_GRID_GAP * 2 : 0);
+  return clamp(Math.round(width), MIN_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, totalWidth - reservedWidth));
+}
+
+function clampWorkspaceAiWidth(width: number, totalWidth: number, sidebar: number): number {
+  const maxWidth = Math.max(
+    MIN_AI_PANEL_WIDTH,
+    totalWidth - sidebar - MIN_PREVIEW_PANEL_WIDTH - WORKSPACE_SPLIT_HANDLE_WIDTH * 2 - WORKSPACE_GRID_GAP * 4,
+  );
+  return clamp(Math.round(width), MIN_AI_PANEL_WIDTH, maxWidth);
 }
 
 function App() {
@@ -168,6 +194,7 @@ function App() {
   const [saveType, setSaveType] = useState<SaveType>("pdf");
   const [openExplorerAfterSave, setOpenExplorerAfterSave] = useState(true);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [draggingWorkspaceTabId, setDraggingWorkspaceTabId] = useState<string | null>(null);
@@ -201,6 +228,7 @@ function App() {
   const [pdfInfoFonts, setPdfInfoFonts] = useState<PdfFontInfo[]>([]);
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false);
   const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiPanelWidth, setAiPanelWidth] = useState(DEFAULT_AI_PANEL_WIDTH);
   const [hasHydratedStoredSettings, setHasHydratedStoredSettings] = useState(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -247,12 +275,14 @@ function App() {
   const [securityConfirmPassword, setSecurityConfirmPassword] = useState("");
   const [securityModalError, setSecurityModalError] = useState<string | null>(null);
   const [pendingProtectedPdfPath, setPendingProtectedPdfPath] = useState<string | null>(null);
+  const [workspaceViewportWidth, setWorkspaceViewportWidth] = useState(() => window.innerWidth);
   const isE2EMode = useMemo(() => {
     if (import.meta.env.MODE === "e2e") return true;
     return new URLSearchParams(window.location.search).has("e2e");
   }, []);
 
   const previewHostRef = useRef<HTMLDivElement | null>(null);
+  const workspaceRef = useRef<HTMLElement | null>(null);
   const previewInteractionRef = useRef<HTMLDivElement | null>(null);
   const previewPrimarySlotRef = useRef<HTMLDivElement | null>(null);
   const previewSecondarySlotRef = useRef<HTMLDivElement | null>(null);
@@ -302,6 +332,10 @@ function App() {
   const previewPrefetchIdleRef = useRef<IdleTaskHandle | null>(null);
   const thumbnailPrefetchIdleRef = useRef<IdleTaskHandle | null>(null);
   const pdfInfoLoadTokenRef = useRef(0);
+  const splitDragStateRef = useRef<{
+    kind: "sidebar" | "ai";
+    pointerId: number;
+  } | null>(null);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -379,6 +413,18 @@ function App() {
     const memoryBonus = deviceMemory >= 8 ? 2 : deviceMemory >= 4 ? 1 : 0;
     return Math.max(6, Math.min(14, 6 + spreadBonus + areaBonus + memoryBonus));
   }, [previewSize.height, previewSize.width, previewSpreadMode]);
+  const isStackedWorkspace = workspaceViewportWidth <= STACKED_WORKSPACE_BREAKPOINT;
+  const workspaceGridStyle = useMemo(() => {
+    if (isStackedWorkspace) return undefined;
+    if (showAiPanel) {
+      return {
+        gridTemplateColumns: `${sidebarWidth}px ${WORKSPACE_SPLIT_HANDLE_WIDTH}px minmax(0, 1fr) ${WORKSPACE_SPLIT_HANDLE_WIDTH}px ${aiPanelWidth}px`,
+      };
+    }
+    return {
+      gridTemplateColumns: `${sidebarWidth}px ${WORKSPACE_SPLIT_HANDLE_WIDTH}px minmax(0, 1fr)`,
+    };
+  }, [aiPanelWidth, isStackedWorkspace, showAiPanel, sidebarWidth]);
   const statusText = useMemo(() => {
     if (status.type === "ready") return tr("", "");
     if (status.type === "loadingPdf") {
@@ -464,17 +510,21 @@ function App() {
     "app.locale": locale,
     "app.toolbarCollapsed": isToolbarCollapsed,
     "app.sidebarTab": sidebarTab,
+    "app.sidebarWidth": sidebarWidth,
     "app.previewZoom": previewZoom,
     "app.previewZoomMode": previewZoomMode,
     "app.previewSpreadMode": previewSpreadMode,
     "app.openExplorerAfterSave": openExplorerAfterSave,
     "app.showShortcuts": showShortcuts,
     "ai.panelOpen": showAiPanel,
+    "ai.panelWidth": aiPanelWidth,
   }), [
+    aiPanelWidth,
     isToolbarCollapsed,
     locale,
     openExplorerAfterSave,
     sidebarTab,
+    sidebarWidth,
     previewSpreadMode,
     previewZoom,
     previewZoomMode,
@@ -491,16 +541,21 @@ function App() {
         const storedLocale = settings["app.locale"];
         const storedToolbarCollapsed = settings["app.toolbarCollapsed"];
         const storedSidebarTab = settings["app.sidebarTab"];
+        const storedSidebarWidth = settings["app.sidebarWidth"];
         const storedPreviewZoom = settings["app.previewZoom"];
         const storedPreviewZoomMode = settings["app.previewZoomMode"];
         const storedPreviewSpreadMode = settings["app.previewSpreadMode"];
         const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
         const storedShowShortcuts = settings["app.showShortcuts"];
         const storedAiPanelOpen = settings["ai.panelOpen"];
+        const storedAiPanelWidth = settings["ai.panelWidth"];
 
         if (storedLocale === "ko" || storedLocale === "en") setLocale(storedLocale);
         if (typeof storedToolbarCollapsed === "boolean") setIsToolbarCollapsed(storedToolbarCollapsed);
         if (storedSidebarTab === "thumbnails" || storedSidebarTab === "outline") setSidebarTab(storedSidebarTab);
+        if (typeof storedSidebarWidth === "number") {
+          setSidebarWidth(clampWorkspaceSidebarWidth(storedSidebarWidth, window.innerWidth, typeof storedAiPanelOpen === "boolean" ? storedAiPanelOpen : showAiPanel));
+        }
         if (typeof storedPreviewZoom === "number") {
           setPreviewZoom(clamp(Math.round(storedPreviewZoom), ZOOM_MIN, ZOOM_MAX));
         }
@@ -511,16 +566,25 @@ function App() {
         if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
         if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
+        if (typeof storedAiPanelWidth === "number") {
+          setAiPanelWidth(clampWorkspaceAiWidth(storedAiPanelWidth, window.innerWidth, typeof storedSidebarWidth === "number" ? storedSidebarWidth : sidebarWidth));
+        }
         persistedSettingsRef.current = buildPersistedAppSettings({
           "app.locale": storedLocale === "ko" || storedLocale === "en" ? storedLocale : locale,
           "app.toolbarCollapsed": typeof storedToolbarCollapsed === "boolean" ? storedToolbarCollapsed : false,
           "app.sidebarTab": storedSidebarTab === "thumbnails" || storedSidebarTab === "outline" ? storedSidebarTab : "thumbnails",
+          "app.sidebarWidth": typeof storedSidebarWidth === "number"
+            ? clampWorkspaceSidebarWidth(storedSidebarWidth, window.innerWidth, typeof storedAiPanelOpen === "boolean" ? storedAiPanelOpen : showAiPanel)
+            : DEFAULT_SIDEBAR_WIDTH,
           "app.previewZoom": typeof storedPreviewZoom === "number" ? clamp(Math.round(storedPreviewZoom), ZOOM_MIN, ZOOM_MAX) : 100,
           "app.previewZoomMode": storedPreviewZoomMode === "fit" || storedPreviewZoomMode === "manual" ? storedPreviewZoomMode : "fit",
           "app.previewSpreadMode": typeof storedPreviewSpreadMode === "boolean" ? storedPreviewSpreadMode : false,
           "app.openExplorerAfterSave": typeof storedOpenExplorerAfterSave === "boolean" ? storedOpenExplorerAfterSave : true,
           "app.showShortcuts": typeof storedShowShortcuts === "boolean" ? storedShowShortcuts : false,
           "ai.panelOpen": typeof storedAiPanelOpen === "boolean" ? storedAiPanelOpen : false,
+          "ai.panelWidth": typeof storedAiPanelWidth === "number"
+            ? clampWorkspaceAiWidth(storedAiPanelWidth, window.innerWidth, typeof storedSidebarWidth === "number" ? storedSidebarWidth : sidebarWidth)
+            : DEFAULT_AI_PANEL_WIDTH,
         });
         setHasHydratedStoredSettings(true);
       })
@@ -559,6 +623,81 @@ function App() {
     const frameId = window.requestAnimationFrame(() => searchInputRef.current?.focus());
     return () => window.cancelAnimationFrame(frameId);
   }, [showSearchBar]);
+
+  useEffect(() => {
+    const element = workspaceRef.current;
+    if (!element) return undefined;
+
+    const syncWorkspaceViewport = () => {
+      setWorkspaceViewportWidth(element.getBoundingClientRect().width || window.innerWidth);
+    };
+    syncWorkspaceViewport();
+
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver((entries) => {
+        const nextWidth = entries[0]?.contentRect.width;
+        if (typeof nextWidth === "number" && Number.isFinite(nextWidth)) {
+          setWorkspaceViewportWidth(nextWidth);
+        }
+      })
+      : null;
+
+    resizeObserver?.observe(element);
+    window.addEventListener("resize", syncWorkspaceViewport);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", syncWorkspaceViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isStackedWorkspace) return;
+    const clampedSidebar = clampWorkspaceSidebarWidth(sidebarWidth, workspaceViewportWidth, showAiPanel);
+    if (clampedSidebar !== sidebarWidth) setSidebarWidth(clampedSidebar);
+    setAiPanelWidth((prev) => clampWorkspaceAiWidth(prev, workspaceViewportWidth, clampedSidebar));
+  }, [isStackedWorkspace, showAiPanel, sidebarWidth, workspaceViewportWidth]);
+
+  useEffect(() => {
+    const dragState = splitDragStateRef.current;
+    if (!dragState || isStackedWorkspace) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerId !== dragState.pointerId) return;
+      const workspaceRect = workspaceRef.current?.getBoundingClientRect();
+      if (!workspaceRect) return;
+      if (dragState.kind === "sidebar") {
+        const nextWidth = event.clientX - workspaceRect.left;
+        setSidebarWidth(clampWorkspaceSidebarWidth(nextWidth, workspaceRect.width, showAiPanel));
+        return;
+      }
+      const nextWidth = workspaceRect.right - event.clientX;
+      setAiPanelWidth(clampWorkspaceAiWidth(nextWidth, workspaceRect.width, sidebarWidth));
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.pointerId !== dragState.pointerId) return;
+      splitDragStateRef.current = null;
+      document.body.classList.remove("workspace-resizing");
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      document.body.classList.remove("workspace-resizing");
+    };
+  }, [isStackedWorkspace, showAiPanel, sidebarWidth]);
+
+  const beginWorkspaceResize = useCallback((kind: "sidebar" | "ai", event: React.PointerEvent<HTMLDivElement>) => {
+    if (isStackedWorkspace) return;
+    splitDragStateRef.current = { kind, pointerId: event.pointerId };
+    document.body.classList.add("workspace-resizing");
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }, [isStackedWorkspace]);
 
   useEffect(() => {
     if (!showSearchBar) {
@@ -4230,7 +4369,11 @@ function App() {
       {errorText ? <section className="panel error-banner">{errorText}</section> : null}
       {toastText ? <section className="toast-banner">{toastText}</section> : null}
 
-      <main className={`workspace ${showAiPanel ? "with-ai" : ""}`}>
+      <main
+        ref={workspaceRef}
+        className={`workspace ${showAiPanel ? "with-ai" : ""}`}
+        style={workspaceGridStyle}
+      >
         <aside className="panel sidebar">
           <div className="sidebar-head">
             <strong
@@ -4565,6 +4708,16 @@ function App() {
           )}
         </aside>
 
+        {!isStackedWorkspace ? (
+          <div
+            className="panel-resize-handle"
+            role="separator"
+            aria-label={tr("왼쪽 사이드바 너비 조절", "Resize left sidebar")}
+            aria-orientation="vertical"
+            onPointerDown={(event) => beginWorkspaceResize("sidebar", event)}
+          />
+        ) : null}
+
         <section className="panel preview-panel" ref={previewHostRef} data-testid="preview-panel">
           {pdfDoc ? (
             <>
@@ -4758,6 +4911,16 @@ function App() {
           )}
         </section>
 
+        {showAiPanel && !isStackedWorkspace ? (
+          <div
+            className="panel-resize-handle"
+            role="separator"
+            aria-label={tr("오른쪽 AI 패널 너비 조절", "Resize AI panel")}
+            aria-orientation="vertical"
+            onPointerDown={(event) => beginWorkspaceResize("ai", event)}
+          />
+        ) : null}
+
         {showAiPanel ? (
           <Suspense fallback={<aside className="panel ai-panel"><div className="empty-panel">{tr("AI 패널 로딩 중...", "Loading AI panel...")}</div></aside>}>
             <AiChatPanel
@@ -4766,6 +4929,7 @@ function App() {
               pdfBytes={pdfBytes}
               pdfPath={pdfPath}
               isBusy={isBusy}
+              canPrepareIndex={isInitialPreviewReady}
               onJumpToCitation={handleJumpToAiCitation}
             />
           </Suspense>

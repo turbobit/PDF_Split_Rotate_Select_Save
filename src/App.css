@@ -480,6 +480,44 @@ input:disabled {
   grid-template-columns: 300px minmax(0, 1fr) 420px;
 }
 
+body.workspace-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.panel-resize-handle {
+  position: relative;
+  min-width: 10px;
+  min-height: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.panel-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.panel-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgba(91, 76, 57, 0.22);
+  transition: background 140ms ease, width 140ms ease;
+}
+
+.panel-resize-handle:hover::after,
+body.workspace-resizing .panel-resize-handle::after {
+  width: 4px;
+  background: rgba(91, 76, 57, 0.46);
+}
+
 .sidebar,
 .preview-panel {
   display: flex;
@@ -1078,6 +1116,15 @@ input:disabled {
   gap: 6px;
 }
 
+.preview-tools .ghost-btn,
+.preview-search-row .ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 26px;
+}
+
 .preview-search-row {
   width: min(100%, 920px);
   display: flex;
@@ -1174,6 +1221,13 @@ input:disabled {
   gap: 8px;
 }
 
+.ai-panel-head-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .ai-endpoint-select {
   flex: 1;
   min-width: 0;
@@ -1193,92 +1247,20 @@ input:disabled {
 .ai-status-card {
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
-  display: grid;
-  gap: 8px;
+  display: block;
 }
 
-.ai-status-card-toggle {
+.ai-status-card-summary {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.82);
   padding: 10px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  text-align: left;
-  color: inherit;
-  cursor: pointer;
-}
-
-.ai-status-card-toggle:hover {
-  border-color: #cc7a34;
-  background: #fff7ee;
 }
 
 .ai-status-card-title {
   min-width: 0;
   display: grid;
   gap: 3px;
-}
-
-.ai-status-card-toggle-label {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.ai-status-card-body {
-  display: grid;
-  gap: 8px;
-}
-
-.ai-status-panel {
-  width: 100%;
-}
-
-.ai-status-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ai-status-chip {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.ai-status-chip-service {
-  max-width: 100%;
-}
-
-.ai-status-action {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.82);
-  padding: 8px;
-  display: grid;
-  gap: 4px;
-  text-align: left;
-  color: inherit;
-  cursor: pointer;
-}
-
-.ai-status-action:hover:not(:disabled) {
-  border-color: #cc7a34;
-  background: #fff7ee;
-}
-
-.ai-status-action:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
 }
 
 .ai-status-card strong {
@@ -1292,18 +1274,34 @@ input:disabled {
   color: var(--ink);
 }
 
-.ai-status-chip strong {
-  font-size: 10px;
-  color: var(--muted);
-  white-space: nowrap;
+.ai-status-card-status {
+  font-weight: 600;
+  line-height: 1.3;
 }
 
-.ai-status-chip span {
+.ai-index-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(220px, 48vw);
   min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #d8d5cf;
+  background: #f8f5ef;
+  color: #6a5a44;
+  font-size: 11px;
   line-height: 1.2;
-  word-break: break-word;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+}
+
+.ai-index-pill.busy {
+  border-color: #e2c694;
+  background: #fff1d8;
+  color: #7a5a13;
 }
 
 .ai-inline-note {
@@ -2022,6 +2020,10 @@ input:disabled {
     grid-template-rows: 34% 34% 32%;
   }
 
+  .panel-resize-handle {
+    display: none;
+  }
+
   .toolbar-block {
     padding-right: 0;
   }
@@ -2053,10 +2055,6 @@ input:disabled {
   .help-popover {
     right: auto;
     left: 0;
-  }
-
-  .ai-status-summary {
-    flex-direction: column;
   }
 
   .ai-compose-actions {
