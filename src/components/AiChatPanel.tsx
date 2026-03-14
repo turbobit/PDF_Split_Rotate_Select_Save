@@ -207,7 +207,17 @@ function readString(value: unknown): string | null {
 
 function compactHomePath(path: string): string {
   if (!path) return path;
-  return path.replace(/^\/Users\/[^/]+/, "~").replace(/^\/home\/[^/]+/, "~");
+  const normalized = path.replace(/\\/g, "/");
+  const withHome = normalized
+    .replace(/^\/Users\/[^/]+/, "~")
+    .replace(/^\/home\/[^/]+/, "~")
+    .replace(/^([A-Za-z]:)\/Users\/[^/]+/, "~");
+  if (withHome.length <= 34) return withHome;
+  const segments = withHome.split("/").filter(Boolean);
+  if (segments.length <= 2) return withHome;
+  const tail = segments.slice(-2).join("/");
+  const head = withHome.startsWith("~") ? "~/" : "";
+  return `${head}.../${tail}`;
 }
 
 function supportsEmbeddings(provider: AiProvider): boolean {
@@ -881,7 +891,7 @@ export default function AiChatPanel({ tr, pdfDoc, pdfBytes, pdfPath, isBusy, onJ
   return (
     <aside className="panel ai-panel">
       <div className="ai-panel-head">
-        <div>
+        <div className="ai-panel-head-meta">
           <strong>{tr("AI대화", "AI Chat")}</strong>
           <p>{compactDatabasePath || tr("SQLite 설정 DB 준비 중...", "Preparing SQLite settings DB...")}</p>
         </div>
