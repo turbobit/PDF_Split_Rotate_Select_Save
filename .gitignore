@@ -20,6 +20,7 @@ lerna-debug.log*
 *.tmp
 *.temp
 *.pdb
+test-results/
 
 # Editor / OS files
 .vscode/*
