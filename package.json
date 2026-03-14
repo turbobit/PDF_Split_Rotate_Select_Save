@@ -8,7 +8,10 @@
     "build": "node scripts/clean-build.js && tsc && vite build",
     "preview": "vite preview",
     "tauri": "node scripts/tauri-wrapper.mjs",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "e2e:fixtures": "node scripts/generate-e2e-fixtures.mjs",
+    "e2e:test": "npm run e2e:fixtures && playwright test",
+    "e2e:test:headed": "npm run e2e:fixtures && playwright test --headed"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -23,6 +26,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.54.2",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
