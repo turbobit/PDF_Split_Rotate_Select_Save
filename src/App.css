@@ -536,13 +536,13 @@ body.workspace-resizing .panel-resize-handle::after {
   border-radius: 0;
   border: none;
   box-shadow: none;
-  background: #111;
+  background: #fff;
 }
 
 .preview-panel:fullscreen .preview-canvas-wrap {
   padding: 12px;
   justify-content: center;
-  background: #111;
+  background: #fff;
   overflow: hidden;
 }
 
@@ -569,6 +569,16 @@ body.workspace-resizing .panel-resize-handle::after {
 .preview-panel:fullscreen .preview-text-layer,
 .preview-panel:fullscreen .preview-text-layer {
   display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .preview-panel:fullscreen {
+    background: #000;
+  }
+
+  .preview-panel:fullscreen .preview-canvas-wrap {
+    background: #000;
+  }
 }
 
 .ai-panel {
@@ -884,6 +894,47 @@ body.workspace-resizing .panel-resize-handle::after {
   line-height: 1;
   cursor: grab;
   user-select: none;
+}
+
+.thumb-order-btns {
+  display: inline-flex;
+  flex-direction: row;
+  gap: 0;
+  line-height: 0;
+}
+
+.thumb-order-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.thumb-order-btn:first-child {
+  border-radius: 2px 0 0 2px;
+}
+
+.thumb-order-btn:last-child {
+  border-radius: 0 2px 2px 0;
+}
+
+.thumb-order-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.thumb-order-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .thumb-card.dragging .thumb-drag-handle {

@@ -1,4 +1,4 @@
-import { PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, type PDFRef, degrees } from "pdf-lib";
+import { PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, type PDFRef } from "pdf-lib";
 import { type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist";
 
 export const THUMBNAIL_SCALE = 0.18;
@@ -439,6 +439,13 @@ export function normalizeRotationDegrees(value: number): number {
   return ((value % 360) + 360) % 360;
 }
 
+/** PDF /Rotate는 0, 90, 180, 270만 유효. 각도를 90도 배수로 내림. */
+export function reduceRotationToQuadrant(degreeAngle: number): 0 | 90 | 180 | 270 {
+  const normalized = normalizeRotationDegrees(degreeAngle);
+  const quadrants = Math.round(normalized / 90) % 4;
+  return (quadrants === 0 ? 0 : quadrants * 90) as 0 | 90 | 180 | 270;
+}
+
 export async function appendPageWithRotation(
   outputDocument: PDFDocument,
   sourceDocument: PDFDocument,
@@ -447,8 +454,10 @@ export async function appendPageWithRotation(
 ): Promise<void> {
   const [copied] = await outputDocument.copyPages(sourceDocument, [sourcePageIndex]);
   const currentRotation = normalizeRotationDegrees(copied.getRotation().angle);
-  const finalRotation = normalizeRotationDegrees(currentRotation + extraRotation);
-  copied.setRotation(degrees(finalRotation));
+  const totalDegrees = normalizeRotationDegrees(currentRotation + extraRotation);
+  const pdfRotate = reduceRotationToQuadrant(totalDegrees);
+  const pageWithNode = copied as { node: { set: (name: unknown, value: unknown) => void }; doc: { context: { obj: (n: number) => unknown } } };
+  pageWithNode.node.set(PDFName.of("Rotate"), pageWithNode.doc.context.obj(pdfRotate));
   outputDocument.addPage(copied);
 }
 
@@ -477,9 +486,12 @@ export async function renderPageToBlob(
   scale: number,
   mimeType: "image/png" | "image/jpeg",
   quality?: number,
-  rotation = 0,
+  extraRotation = 0,
 ): Promise<Blob> {
-  const viewport = page.getViewport({ scale, rotation });
+  const viewport = page.getViewport({
+    scale,
+    rotation: normalizeRotationDegrees((page.rotate ?? 0) + extraRotation),
+  });
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.floor(viewport.width));
   canvas.height = Math.max(1, Math.floor(viewport.height));

@@ -1,4 +1,4 @@
-import { normalizePdfRect, rectHasArea, type PdfRect } from "./app-view-helpers";
+import { normalizePdfRect, rectHasArea, type PdfRect } from "./app-view-utils";
 import { normalizeOutlineTitle } from "./app-helpers";
 
 export type PdfLinkAnnotationLike = {

@@ -21,6 +21,7 @@ import MergePdfModal from "./components/MergePdfModal";
 import PdfInfoModal, { type PdfFontInfo, type PdfInfoField } from "./components/PdfInfoModal";
 import PdfSecurityModal from "./components/PdfSecurityModal";
 import WorkspaceTabStrip from "./components/WorkspaceTabStrip";
+import { PreviewTextLayer, ToolbarIcon } from "./app/app-view-helpers";
 import {
   buildPreviewCacheKey,
   imageMimeTypeFromPath,
@@ -37,13 +38,11 @@ import {
   PreviewLinkOverlay,
   PdfRect,
   PdfSecurityMode,
-  PreviewTextLayer,
   readStoredZoom,
   rectHasArea,
-  SHORTCUT_LABELS,
-  ToolbarIcon,
   withShortcutHint,
-} from "./app/app-view-helpers";
+} from "./app/app-view-utils";
+import { SHORTCUT_LABELS } from "./app/app-shortcut-labels";
 import {
   APP_VERSION,
   IMAGE_EXPORT_SCALE,
@@ -75,6 +74,7 @@ import {
   formatError,
   hasPdfHeader,
   normalizeFileStem,
+  normalizeRotationDegrees,
   normalizeOutlineDepth,
   normalizeOutlineTitle,
   normalizeSelectionRect,
@@ -140,6 +140,8 @@ type PersistedAppSettings = {
 
 type AppE2EBridge = {
   openPdfFromUrl: (url: string, title?: string) => Promise<boolean>;
+  openPdfFromBytes: (bytes: number[], title?: string) => Promise<boolean>;
+  exportSelectedPdfBytes: () => Promise<number[]>;
 };
 
 const PAGE_TEXT_SEARCH_CACHE_LIMIT = 24;
@@ -262,7 +264,7 @@ function App() {
   const [pendingHydrationPageCount, setPendingHydrationPageCount] = useState(0);
   const [draggingPage, setDraggingPage] = useState<number | null>(null);
   const [dropTargetPage, setDropTargetPage] = useState<number | null>(null);
-  const [draggingPageIndex, setDraggingPageIndex] = useState<number | null>(null);
+  const [, setDraggingPageIndex] = useState<number | null>(null);
   const [isPointerReordering, setIsPointerReordering] = useState(false);
   const [isOutlinePointerReordering, setIsOutlinePointerReordering] = useState(false);
   const [draggingOutlineId, setDraggingOutlineId] = useState<string | null>(null);
@@ -333,10 +335,16 @@ function App() {
   const previewPrefetchIdleRef = useRef<IdleTaskHandle | null>(null);
   const thumbnailPrefetchIdleRef = useRef<IdleTaskHandle | null>(null);
   const pdfInfoLoadTokenRef = useRef(0);
+  const workspaceTabsRef = useRef<WorkspaceTab[]>([]);
+  const activeTabIdRef = useRef<string | null>(null);
+  const openPdfInFlightRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const openPdfInTabRef = useRef<((path: string, options?: { activate?: boolean; password?: string }) => Promise<boolean>) | null>(null);
+  const buildSelectedPdfBytesRef = useRef<(() => Promise<Uint8Array>) | null>(null);
   const splitDragStateRef = useRef<{
     kind: "sidebar" | "ai";
     pointerId: number;
   } | null>(null);
+  const draggingPageIndexRef = useRef<number | null>(null);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -444,6 +452,14 @@ function App() {
     if (status.reason === "pdfSave") return tr("PDF 저장 실패", "PDF save failed");
     return tr("이미지 저장 실패", "Image save failed");
   }, [status, tr]);
+
+  useEffect(() => {
+    workspaceTabsRef.current = workspaceTabs;
+  }, [workspaceTabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
 
   const buildWorkspaceSnapshot = useCallback((): WorkspaceTabSnapshot | null => {
     if (!pdfBytes) return null;
@@ -1655,7 +1671,10 @@ function App() {
       if (getPreviewRenderCacheCanvas(key)) continue;
       try {
         const page = await doc.getPage(target.pageNumber);
-        const viewport = page.getViewport({ scale: target.scale, rotation: target.rotation });
+        const viewport = page.getViewport({
+          scale: target.scale,
+          rotation: normalizeRotationDegrees((page.rotate ?? 0) + target.rotation),
+        });
         const dpr = window.devicePixelRatio || 1;
         const cachedCanvas = document.createElement("canvas");
         cachedCanvas.width = Math.max(1, Math.floor(viewport.width * dpr));
@@ -1700,8 +1719,10 @@ function App() {
         const secondaryPageNumber = previewSpreadMode && activePage < pageCount ? activePage + 1 : null;
         const secondaryPage = secondaryPageNumber ? await pdfDoc.getPage(secondaryPageNumber) : null;
         if (cancelled || renderGeneration !== previewRenderGenerationRef.current) return;
-        const rotation = pageRotationsRef.current[activePage] ?? 0;
-        const secondaryRotation = secondaryPageNumber ? (pageRotationsRef.current[secondaryPageNumber] ?? 0) : 0;
+        const rotation = normalizeRotationDegrees((page.rotate ?? 0) + (pageRotationsRef.current[activePage] ?? 0));
+        const secondaryRotation = secondaryPage
+          ? normalizeRotationDegrees((secondaryPage.rotate ?? 0) + (pageRotationsRef.current[secondaryPageNumber ?? 0] ?? 0))
+          : 0;
         const base = page.getViewport({ scale: 1, rotation });
         const secondaryBase = secondaryPage ? secondaryPage.getViewport({ scale: 1, rotation: secondaryRotation }) : null;
         const spreadGap = secondaryBase ? 12 : 0;
@@ -2091,18 +2112,18 @@ function App() {
     const title = options?.title?.trim() || path?.split(/[\\/]/).pop() || "PDF";
     const normalizedTargetPath = normalizePdfPathKey(path);
     const existingTab = normalizedTargetPath
-      ? workspaceTabs.find((tab) => normalizePdfPathKey(tab.snapshot.pdfPath) === normalizedTargetPath)
+      ? workspaceTabsRef.current.find((tab) => normalizePdfPathKey(tab.snapshot.pdfPath) === normalizedTargetPath)
       : null;
     if (existingTab) {
       if (activate) {
-        persistWorkspaceTabSnapshot(activeTabId);
+        persistWorkspaceTabSnapshot(activeTabIdRef.current);
         setErrorText(null);
         await applyWorkspaceSnapshot(existingTab.id, existingTab.snapshot);
         setActiveTabId(existingTab.id);
       }
       return true;
     }
-    persistWorkspaceTabSnapshot(activeTabId);
+    persistWorkspaceTabSnapshot(activeTabIdRef.current);
     setIsLoadingPdf(true);
     setStatus({ type: "loadingPdf", phase: "reading" });
     try {
@@ -2113,13 +2134,14 @@ function App() {
       const task = getDocument({ data: previewBytes, password });
       const loadedDoc = await task.promise;
       const encrypted = await inspectCurrentPdfSecurity(stateBytes, path);
+      const numPages = loadedDoc.numPages;
       const snapshot: WorkspaceTabSnapshot = {
         pdfPath: path,
-        pageCount: loadedDoc.numPages,
+        pageCount: numPages,
         activePage: 1,
         pageInput: "1",
-        pageOrder: Array.from({ length: loadedDoc.numPages }, (_, index) => index + 1),
-        selectedPages: Array.from({ length: loadedDoc.numPages }, (_, index) => index + 1),
+        pageOrder: Array.from({ length: numPages }, (_, index) => index + 1),
+        selectedPages: Array.from({ length: numPages }, (_, index) => index + 1),
         sidebarTab,
         outlinePanelMode: "view",
         outlineEntries: [],
@@ -2138,7 +2160,11 @@ function App() {
       tabPdfBytesRef.current.set(tabId, stateBytes);
       tabPageOverlaysRef.current.set(tabId, []);
       const nextTab = buildWorkspaceTab(tabId, snapshot, title);
-      setWorkspaceTabs((prev) => [...prev, nextTab]);
+      setWorkspaceTabs((prev) => {
+        const nextTabs = [...prev, nextTab];
+        workspaceTabsRef.current = nextTabs;
+        return nextTabs;
+      });
       if (activate) {
         await applyWorkspaceSnapshot(tabId, snapshot, loadedDoc);
         setActiveTabId(tabId);
@@ -2164,26 +2190,60 @@ function App() {
     } finally {
       setIsLoadingPdf(false);
     }
-  }, [activeTabId, applyWorkspaceSnapshot, inspectCurrentPdfSecurity, isPdfPasswordRequiredError, persistWorkspaceTabSnapshot, sidebarTab, tr, workspaceTabs]);
+  }, [applyWorkspaceSnapshot, inspectCurrentPdfSecurity, isPdfPasswordRequiredError, persistWorkspaceTabSnapshot, sidebarTab, tr]);
 
   const activateWorkspaceTab = useCallback(async (tabId: string) => {
-    if (tabId === activeTabId) return;
-    const targetTab = workspaceTabs.find((tab) => tab.id === tabId);
+    if (tabId === activeTabIdRef.current) return;
+    const targetTab = workspaceTabsRef.current.find((tab) => tab.id === tabId);
     if (!targetTab) return;
-    persistWorkspaceTabSnapshot(activeTabId);
+    persistWorkspaceTabSnapshot(activeTabIdRef.current);
     setErrorText(null);
     await applyWorkspaceSnapshot(targetTab.id, targetTab.snapshot);
     setActiveTabId(targetTab.id);
-  }, [activeTabId, applyWorkspaceSnapshot, persistWorkspaceTabSnapshot, workspaceTabs]);
+  }, [applyWorkspaceSnapshot, persistWorkspaceTabSnapshot]);
 
   const openPdfInTab = useCallback(async (path: string, options?: { activate?: boolean; password?: string }) => {
-    const fileBytes = new Uint8Array(await readFile(path));
-    return openPdfBytesInTab(fileBytes, {
-      activate: options?.activate,
-      password: options?.password,
-      path,
-    });
-  }, [openPdfBytesInTab]);
+    const normalizedTargetPath = normalizePdfPathKey(path);
+    if (normalizedTargetPath) {
+      const existingTab = workspaceTabsRef.current.find((tab) => normalizePdfPathKey(tab.snapshot.pdfPath) === normalizedTargetPath);
+      if (existingTab) {
+        if (options?.activate ?? true) await activateWorkspaceTab(existingTab.id);
+        return true;
+      }
+      const inflight = openPdfInFlightRef.current.get(normalizedTargetPath);
+      if (inflight) {
+        const result = await inflight;
+        if (result && (options?.activate ?? true)) {
+          const targetTab = workspaceTabsRef.current.find((tab) => normalizePdfPathKey(tab.snapshot.pdfPath) === normalizedTargetPath);
+          if (targetTab) await activateWorkspaceTab(targetTab.id);
+        }
+        return result;
+      }
+    }
+
+    const openTask = (async () => {
+      const fileBytes = new Uint8Array(await readFile(path));
+      return openPdfBytesInTab(fileBytes, {
+        activate: options?.activate,
+        password: options?.password,
+        path,
+      });
+    })();
+
+    if (normalizedTargetPath) openPdfInFlightRef.current.set(normalizedTargetPath, openTask);
+    try {
+      return await openTask;
+    } finally {
+      if (normalizedTargetPath) {
+        const currentTask = openPdfInFlightRef.current.get(normalizedTargetPath);
+        if (currentTask === openTask) openPdfInFlightRef.current.delete(normalizedTargetPath);
+      }
+    }
+  }, [activateWorkspaceTab, openPdfBytesInTab]);
+
+  useEffect(() => {
+    openPdfInTabRef.current = openPdfInTab;
+  }, [openPdfInTab]);
 
   const switchToWorkspaceTab = useCallback(async (tabId: string) => {
     await activateWorkspaceTab(tabId);
@@ -2354,30 +2414,38 @@ function App() {
     const searchParams = new URLSearchParams(window.location.search);
     const initialPath = searchParams.get("open");
     if (initialPath) {
-      void openPdfInTab(initialPath, { activate: true });
+      void openPdfInTabRef.current?.(initialPath, { activate: true });
     }
 
-    // Tauri 환경에서만 추가 작업 수행
-    if (isTauriRuntime()) {
-      let unlisten: (() => void) | null = null;
-      void invoke<string | null>("take_startup_pdf_path")
-        .then((startupPath) => {
-          if (initialPath || typeof startupPath !== "string" || startupPath.trim().length === 0) return;
-          void openPdfInTab(startupPath, { activate: true });
-        })
-        .catch(() => {
-          // Ignore startup path lookup failures.
-        });
-      void listen<string>("pdf-open-request", (event) => {
-        void openPdfInTab(event.payload, { activate: true });
-      }).then((dispose) => {
-        unlisten = dispose;
+    if (!isTauriRuntime()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void invoke<string | null>("take_startup_pdf_path")
+      .then((startupPath) => {
+        if (disposed || initialPath || typeof startupPath !== "string" || startupPath.trim().length === 0) return;
+        void openPdfInTabRef.current?.(startupPath, { activate: true });
+      })
+      .catch(() => {
+        // Ignore startup path lookup failures.
       });
-      return () => {
-        if (unlisten) unlisten();
-      };
-    }
-  }, [openPdfInTab]);
+
+    void listen<string>("pdf-open-request", (event) => {
+      void openPdfInTabRef.current?.(event.payload, { activate: true });
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     // Tauri 환경에서만 드래그 앤 드롭 이벤트 리스너 등록
@@ -2417,6 +2485,18 @@ function App() {
           path: url,
           title,
         });
+      },
+      openPdfFromBytes: async (bytes: number[], title?: string) => {
+        return openPdfBytesInTab(new Uint8Array(bytes), {
+          activate: true,
+          path: null,
+          title,
+        });
+      },
+      exportSelectedPdfBytes: async () => {
+        const bytes = await buildSelectedPdfBytesRef.current?.();
+        if (!bytes) throw new Error("Selected PDF export builder is not ready.");
+        return Array.from(bytes);
       },
     };
     window.__PDF_APP_E2E__ = bridge;
@@ -2851,19 +2931,22 @@ function App() {
   useEffect(() => {
     if (!isPointerReordering) return;
     const move = (event: MouseEvent) => {
-      if (draggingPageIndex === null) return;
+      const sourceIndex = draggingPageIndexRef.current;
+      if (sourceIndex === null) return;
       const viewport = thumbViewportRef.current;
       if (!viewport) return;
       const rect = viewport.getBoundingClientRect();
       const relativeY = event.clientY - rect.top + viewport.scrollTop;
       const rawIndex = Math.floor(relativeY / THUMB_ITEM_HEIGHT);
       const targetIndex = clamp(rawIndex, 0, Math.max(0, pageOrderRef.current.length - 1));
-      if (targetIndex === draggingPageIndex) return;
-      movePageInOrderByIndex(draggingPageIndex, targetIndex);
+      if (targetIndex === sourceIndex) return;
+      movePageInOrderByIndex(sourceIndex, targetIndex);
+      draggingPageIndexRef.current = targetIndex;
       setDraggingPageIndex(targetIndex);
       setDropTargetPage(pageOrderRef.current[targetIndex] ?? null);
     };
     const stop = () => {
+      draggingPageIndexRef.current = null;
       setIsPointerReordering(false);
       setDropTargetPage(null);
       setDraggingPage(null);
@@ -2875,7 +2958,7 @@ function App() {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", stop);
     };
-  }, [draggingPageIndex, isPointerReordering, movePageInOrderByIndex]);
+  }, [isPointerReordering, movePageInOrderByIndex]);
 
   const movePage = useCallback((delta: number) => {
     if (pageCount === 0) return;
@@ -3134,8 +3217,9 @@ function App() {
     const sourceDocument = await PDFDocument.load(workingBytes, { updateMetadata: false });
     const outputDocument = await PDFDocument.create();
     const sourceToOutputPage = new Map<number, number>();
+    const rotations = { ...pageRotations };
     for (const [targetIndex, sourcePageNumber] of selectedPageNumbers.entries()) {
-      const extraRotation = pageRotationsRef.current[sourcePageNumber] ?? 0;
+      const extraRotation = rotations[sourcePageNumber] ?? 0;
       await appendPageWithRotation(outputDocument, sourceDocument, sourcePageNumber - 1, extraRotation);
       sourceToOutputPage.set(sourcePageNumber, targetIndex + 1);
     }
@@ -3151,7 +3235,11 @@ function App() {
     }
     await applyPageOverlaysToOutputDocument(outputDocument, sourceToOutputPage);
     return new Uint8Array(await outputDocument.save());
-  }, [applyPageOverlaysToOutputDocument, pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
+  }, [applyPageOverlaysToOutputDocument, pageRotations, pdfBytes, pdfPath, selectedPageNumbers, tr, validOutlineEntries]);
+
+  useEffect(() => {
+    buildSelectedPdfBytesRef.current = buildSelectedPdfBytes;
+  }, [buildSelectedPdfBytes]);
 
   const buildWorkspacePdfBytes = useCallback(async (excludedPageNumbers?: Set<number>): Promise<Uint8Array> => {
     const existingOrder = pageOrder.length === pageCount
@@ -3180,8 +3268,9 @@ function App() {
     const sourceDocument = await PDFDocument.load(workingBytes, { updateMetadata: false });
     const outputDocument = await PDFDocument.create();
     const sourceToOutputPage = new Map<number, number>();
+    const rotations = { ...pageRotations };
     for (const [targetIndex, sourcePageNumber] of pagesToKeep.entries()) {
-      const extraRotation = pageRotationsRef.current[sourcePageNumber] ?? 0;
+      const extraRotation = rotations[sourcePageNumber] ?? 0;
       await appendPageWithRotation(outputDocument, sourceDocument, sourcePageNumber - 1, extraRotation);
       sourceToOutputPage.set(sourcePageNumber, targetIndex + 1);
     }
@@ -3197,7 +3286,7 @@ function App() {
     }
     await applyPageOverlaysToOutputDocument(outputDocument, sourceToOutputPage);
     return new Uint8Array(await outputDocument.save());
-  }, [applyPageOverlaysToOutputDocument, pageCount, pageOrder, pdfBytes, pdfPath, tr, validOutlineEntries]);
+  }, [applyPageOverlaysToOutputDocument, pageCount, pageOrder, pageRotations, pdfBytes, pdfPath, tr, validOutlineEntries]);
 
   const deletePageFromWorkspace = useCallback(async (pageNumber: number) => {
     if (!pdfDoc || !pdfBytes || isBusy) return;
@@ -3226,6 +3315,7 @@ function App() {
       const task = getDocument({ data: previewBytes });
       const nextDoc = await task.promise;
       const nextSelectedPages = new Set<number>();
+      const nextPageRotations: Record<number, number> = {};
       const nextOutlineEntries = validOutlineEntries
         .filter((entry) => remainingPages.includes(entry.pageNumber))
         .map((entry) => ({
@@ -3234,6 +3324,8 @@ function App() {
         }));
       remainingPages.forEach((oldPageNumber, index) => {
         if (selectedPagesRef.current.has(oldPageNumber)) nextSelectedPages.add(index + 1);
+        const savedRotation = pageRotationsRef.current[oldPageNumber] ?? 0;
+        if (savedRotation !== 0) nextPageRotations[index + 1] = savedRotation;
       });
       const currentIndex = existingOrder.indexOf(pageNumber);
       const fallbackIndex = Math.min(currentIndex, remainingPages.length - 1);
@@ -3250,8 +3342,8 @@ function App() {
       setSelectedPages(nextSelectedPages);
       setActivePage(nextActivePage);
       setPageInput(String(nextActivePage));
-      setPageRotations({});
-      pageRotationsRef.current = {};
+      setPageRotations(nextPageRotations);
+      pageRotationsRef.current = nextPageRotations;
       setPageOverlays([]);
       setOutlineEntries(nextOutlineEntries);
       setHasLoadedOutlineOnce(nextOutlineEntries.length > 0);
@@ -3285,17 +3377,72 @@ function App() {
     if (!pdfBytes || selectedPageNumbers.length === 0) return;
     const sourceStem = normalizeFileStem(pdfPath ?? "document.pdf");
     const exportUuid = createExportUuid();
+    const isSavingEntireWorkspace = selectedPageNumbers.length === pageCount;
     const targetPath = await save({
       title: tr("추출 PDF 저장", "Save extracted PDF"),
       defaultPath: `${sourceStem}_${exportUuid}_selected.pdf`,
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
     if (!targetPath) return;
+    const normalizedCurrentPath = normalizePdfPathKey(pdfPath);
+    const normalizedTargetPath = normalizePdfPathKey(targetPath);
+    const isOverwritingCurrentPath = Boolean(
+      normalizedCurrentPath
+      && normalizedTargetPath
+      && normalizedCurrentPath === normalizedTargetPath,
+    );
+    if (isOverwritingCurrentPath && !isSavingEntireWorkspace) {
+      const confirmed = await ask(
+        tr(
+          "현재 파일을 선택한 페이지만 남긴 PDF로 덮어씁니다. 계속할까요?",
+          "This will overwrite the current file with only the selected pages. Continue?",
+        ),
+        { title: tr("현재 파일 덮어쓰기", "Overwrite current file") },
+      );
+      if (!confirmed) return;
+    }
     setIsSaving(true);
     setStatus({ type: "savingPdf" });
     try {
       const outputBytes = await buildSelectedPdfBytes();
       await writeFile(targetPath, outputBytes);
+      if (isOverwritingCurrentPath && activeTabIdRef.current) {
+        const reloadedDoc = await getDocument({ data: cloneBytes(outputBytes) }).promise;
+        const nextPageCount = reloadedDoc.numPages;
+        const nextActivePage = clamp(activePage, 1, Math.max(1, nextPageCount));
+        const nextSnapshot: WorkspaceTabSnapshot = {
+          pdfPath: targetPath,
+          pageCount: nextPageCount,
+          activePage: nextActivePage,
+          pageInput: String(nextActivePage),
+          pageOrder: Array.from({ length: nextPageCount }, (_, index) => index + 1),
+          selectedPages: Array.from({ length: nextPageCount }, (_, index) => index + 1),
+          sidebarTab,
+          outlinePanelMode: "view",
+          outlineEntries: [],
+          hasLoadedOutlineOnce: false,
+          quickSelectInput: "",
+          rangeFromInput: "",
+          rangeToInput: "",
+          isAreaSelectMode: false,
+          showSearchBar: false,
+          searchQuery: "",
+          debouncedSearchQuery: "",
+          pageRotations: {},
+          isCurrentPdfEncrypted: false,
+        };
+        const activeWorkspaceTabId = activeTabIdRef.current;
+        revokeOverlayUrls(tabPageOverlaysRef.current.get(activeWorkspaceTabId) ?? []);
+        tabPdfBytesRef.current.set(activeWorkspaceTabId, new Uint8Array(outputBytes));
+        tabPageOverlaysRef.current.set(activeWorkspaceTabId, []);
+        setWorkspaceTabs((prev) => {
+          const nextTabs = updateWorkspaceTabSnapshot(prev, activeWorkspaceTabId, nextSnapshot);
+          workspaceTabsRef.current = nextTabs;
+          return nextTabs;
+        });
+        await applyWorkspaceSnapshot(activeWorkspaceTabId, nextSnapshot, reloadedDoc);
+        setActiveTabId(activeWorkspaceTabId);
+      }
       if (openExplorerAfterSave) {
         try {
           await revealItemInDir(targetPath);
@@ -3316,7 +3463,20 @@ function App() {
     } finally {
       setIsSaving(false);
     }
-  }, [buildSelectedPdfBytes, openExplorerAfterSave, pdfBytes, pdfPath, selectedPageNumbers.length, showToast, tr]);
+  }, [
+    activePage,
+    applyWorkspaceSnapshot,
+    buildSelectedPdfBytes,
+    openExplorerAfterSave,
+    pageCount,
+    pdfBytes,
+    pdfPath,
+    revokeOverlayUrls,
+    selectedPageNumbers.length,
+    showToast,
+    sidebarTab,
+    tr,
+  ]);
 
   const handleSaveProtectedPdf = useCallback(async (password: string) => {
     setErrorText(null);
@@ -4481,15 +4641,45 @@ function App() {
                               if (isBusy) return;
                               event.preventDefault();
                               event.stopPropagation();
+                              const index = pageOrderIndexMap[pageNumber] ?? null;
+                              draggingPageIndexRef.current = index;
                               setIsPointerReordering(true);
                               setDraggingPage(pageNumber);
-                              setDraggingPageIndex(pageOrderIndexMap[pageNumber] ?? null);
+                              setDraggingPageIndex(index);
                               setDropTargetPage(pageNumber);
                             }}
                           >
                             |||
                           </span>
-                          <span>{pageNumber}p</span>
+                          <span title={`${tr("순서", "Order")} ${(pageOrderIndexMap[pageNumber] ?? 0) + 1} · ${tr("원본", "Original")} ${pageNumber}p`}>{(pageOrderIndexMap[pageNumber] ?? 0) + 1}p</span>
+                          <span className="thumb-order-btns" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              className="thumb-order-btn"
+                              disabled={isBusy || (pageOrderIndexMap[pageNumber] ?? 0) <= 0}
+                              title={tr("순서 위로", "Move up")}
+                              aria-label={tr("위로", "Up")}
+                              onClick={() => {
+                                const idx = pageOrderIndexMap[pageNumber] ?? 0;
+                                if (idx > 0) movePageInOrderByIndex(idx, idx - 1);
+                              }}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              className="thumb-order-btn"
+                              disabled={isBusy || (pageOrderIndexMap[pageNumber] ?? 0) >= pageOrder.length - 1}
+                              title={tr("순서 아래로", "Move down")}
+                              aria-label={tr("아래로", "Down")}
+                              onClick={() => {
+                                const idx = pageOrderIndexMap[pageNumber] ?? 0;
+                                if (idx < pageOrder.length - 1) movePageInOrderByIndex(idx, idx + 1);
+                              }}
+                            >
+                              ↓
+                            </button>
+                          </span>
                         </span>
                         <div className="thumb-actions" onClick={(event) => event.stopPropagation()}>
                           <label className="thumb-check">

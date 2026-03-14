@@ -1,0 +1,18 @@
+export const SHORTCUT_LABELS = {
+  openPdf: "Ctrl+O",
+  addPdf: "Ctrl+Shift+O",
+  mergePdfs: "Ctrl+Shift+M",
+  closePdf: "Ctrl+W",
+  printSelection: "Ctrl+P",
+  saveSelection: "Ctrl+S",
+  applyQuickSelection: "Enter",
+  selectAllPages: "Ctrl+A",
+  clearSelection: "Esc",
+  removeRange: "Ctrl+-",
+  previousPage: "PageUp",
+  nextPage: "PageDown",
+  rotateLeft: "Ctrl+[",
+  rotateRight: "Ctrl+]",
+  findInDocument: "Ctrl+F",
+  togglePreviewFullscreen: "Ctrl+L",
+} as const;
