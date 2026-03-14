@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef } from "react";
+import { useModalEscapeClose } from "./useModalEscapeClose";
 
 type TranslateFn = (ko: string, en: string) => string;
 
@@ -33,6 +34,12 @@ function PdfSecurityModal({
   const isProtectMode = mode === "protect";
   const isOpenMode = mode === "open";
   const isUnlockMode = mode === "unprotect";
+
+  useModalEscapeClose({
+    isOpen,
+    onClose,
+    disabled: isSubmitting,
+  });
 
   useEffect(() => {
     if (!isOpen) return;

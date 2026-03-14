@@ -1,10 +1,16 @@
 import { memo } from "react";
+import { useModalEscapeClose } from "./useModalEscapeClose";
 
 type TranslateFn = (ko: string, en: string) => string;
 
 export type PdfInfoField = {
   label: string;
   value: string;
+};
+
+export type PdfFontInfo = {
+  name: string;
+  pageCount: number;
 };
 
 type PdfInfoModalProps = {
@@ -14,8 +20,12 @@ type PdfInfoModalProps = {
   onChangeTab: (tab: "metadata" | "fonts") => void;
   onClose: () => void;
   isLoading: boolean;
+  loadingText: string;
+  onCancelLoading: () => void;
   metadataFields: PdfInfoField[];
-  fontNames: string[];
+  fonts: PdfFontInfo[];
+  onCopyFontName: (fontName: string) => void;
+  onSearchFontInfo: (fontName: string) => void;
 };
 
 function PdfInfoModal({
@@ -25,9 +35,18 @@ function PdfInfoModal({
   onChangeTab,
   onClose,
   isLoading,
+  loadingText,
+  onCancelLoading,
   metadataFields,
-  fontNames,
+  fonts,
+  onCopyFontName,
+  onSearchFontInfo,
 }: PdfInfoModalProps) {
+  useModalEscapeClose({
+    isOpen,
+    onClose,
+  });
+
   if (!isOpen) return null;
 
   return (
@@ -50,7 +69,14 @@ function PdfInfoModal({
             {tr("폰트 목록", "Fonts")}
           </button>
         </div>
-        {isLoading ? <div className="empty-panel">{tr("PDF 정보를 불러오는 중...", "Loading PDF info...")}</div> : null}
+        {isLoading ? (
+          <div className="empty-panel">
+            <div>{loadingText || tr("PDF 정보를 불러오는 중...", "Loading PDF info...")}</div>
+            <button className="ghost-btn micro-btn" type="button" onClick={onCancelLoading}>
+              {tr("중지", "Stop")}
+            </button>
+          </div>
+        ) : null}
         {!isLoading && activeTab === "metadata" ? (
           <div className="pdf-info-list">
             {metadataFields.length > 0 ? metadataFields.map((field) => (
@@ -65,8 +91,31 @@ function PdfInfoModal({
         ) : null}
         {!isLoading && activeTab === "fonts" ? (
           <div className="pdf-font-list">
-            {fontNames.length > 0 ? fontNames.map((fontName) => (
-              <div key={fontName} className="pdf-font-item">{fontName}</div>
+            {fonts.length > 0 ? fonts.map((font) => (
+              <div key={font.name} className="pdf-font-item">
+                <div className="pdf-font-item-top">
+                  <input
+                    className="pdf-font-name-input"
+                    type="text"
+                    value={font.name}
+                    readOnly
+                    onFocus={(event) => event.currentTarget.select()}
+                    aria-label={tr("폰트 이름", "Font name")}
+                    title={font.name}
+                  />
+                  <span className="pdf-font-meta">
+                    {tr("사용 페이지", "Used on pages")} {font.pageCount}
+                  </span>
+                </div>
+                <div className="pdf-font-actions">
+                  <button className="ghost-btn micro-btn" type="button" onClick={() => onCopyFontName(font.name)}>
+                    {tr("복사", "Copy")}
+                  </button>
+                  <button className="ghost-btn micro-btn" type="button" onClick={() => onSearchFontInfo(font.name)}>
+                    {tr("폰트정보검색", "Search Font Info")}
+                  </button>
+                </div>
+              </div>
             )) : (
               <div className="empty-panel">{tr("감지된 폰트가 없습니다.", "No fonts detected.")}</div>
             )}

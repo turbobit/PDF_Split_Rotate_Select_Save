@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { useModalEscapeClose } from "./useModalEscapeClose";
 
 type TranslateFn = (ko: string, en: string) => string;
 
@@ -29,6 +30,12 @@ function AddPdfModal({
   onClose,
   onApply,
 }: AddPdfModalProps) {
+  useModalEscapeClose({
+    isOpen,
+    onClose,
+    disabled: isAddingPdf,
+  });
+
   if (!isOpen) return null;
 
   return (

@@ -1,4 +1,5 @@
 import { memo, type RefObject } from "react";
+import { useModalEscapeClose } from "./useModalEscapeClose";
 
 type TranslateFn = (ko: string, en: string) => string;
 type MergeInsertPosition = "front" | "back" | "beforeActive" | "afterActive";
@@ -36,6 +37,12 @@ function MergePdfModal({
   onClose,
   onApply,
 }: MergePdfModalProps) {
+  useModalEscapeClose({
+    isOpen,
+    onClose,
+    disabled: isAddingPdf,
+  });
+
   if (!isOpen) return null;
 
   return (
