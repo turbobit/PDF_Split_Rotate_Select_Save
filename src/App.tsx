@@ -9,16 +9,18 @@ import { PDFDocument, rgb } from "pdf-lib";
 import {
   GlobalWorkerOptions,
   getDocument,
+  OPS,
   type PDFDocumentProxy,
   type PDFPageProxy,
   type RenderTask,
 } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { Suspense, lazy, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, type DragEvent as ReactDragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AddPdfModal from "./components/AddPdfModal";
 import MergePdfModal from "./components/MergePdfModal";
-import PdfInfoModal, { type PdfInfoField } from "./components/PdfInfoModal";
+import PdfInfoModal, { type PdfFontInfo, type PdfInfoField } from "./components/PdfInfoModal";
 import PdfSecurityModal from "./components/PdfSecurityModal";
+import WorkspaceTabStrip from "./components/WorkspaceTabStrip";
 import {
   buildPreviewCacheKey,
   imageMimeTypeFromPath,
@@ -32,6 +34,7 @@ import {
   PAGE_LOAD_BATCH_DELAY_MS,
   PAGE_LOAD_BATCH_SIZE,
   PdfPageOverlay,
+  PreviewLinkOverlay,
   PdfRect,
   PdfSecurityMode,
   PreviewTextLayer,
@@ -78,6 +81,7 @@ import {
   parsePageSelectionSpec,
   parsePositiveInt,
   renderPageToBlob,
+  resolveOutlinePageNumber,
   type Locale,
   type OutlineEntry,
   type PdfOutlineNode,
@@ -89,6 +93,14 @@ import {
   type StatusState,
 } from "./app/app-helpers";
 import { isTauriRuntime, loadAppSettings, saveAppSettings } from "./app/settings-store";
+import {
+  buildWorkspaceTab,
+  reorderWorkspaceTabs,
+  updateWorkspaceTabSnapshot,
+  type SearchResultItem,
+  type WorkspaceTab,
+  type WorkspaceTabSnapshot,
+} from "./app/workspace-tabs";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
@@ -102,14 +114,123 @@ type InspectPdfSecurityResponse = {
 type PersistedAppSettings = {
   "app.locale": Locale;
   "app.toolbarCollapsed": boolean;
+  "app.sidebarTab": SidebarTab;
   "app.previewZoom": number;
   "app.previewZoomMode": "fit" | "manual";
   "app.previewSpreadMode": boolean;
   "app.openExplorerAfterSave": boolean;
-  "app.openPdfInNewWindow": boolean;
   "app.showShortcuts": boolean;
   "ai.panelOpen": boolean;
 };
+
+type AppE2EBridge = {
+  openPdfFromUrl: (url: string, title?: string) => Promise<boolean>;
+};
+
+type PdfLinkAnnotationLike = {
+  rect?: unknown;
+  url?: unknown;
+  unsafeUrl?: unknown;
+  dest?: string | Array<unknown> | null;
+  subtype?: unknown;
+};
+
+type PdfJsCommonFontLike = {
+  name?: string;
+  loadedName?: string;
+  fallbackName?: string;
+  systemFontInfo?: {
+    css?: string;
+    loadedName?: string;
+  };
+};
+
+function parseLinkAnnotationRect(value: unknown): PdfRect | null {
+  if (!Array.isArray(value) || value.length < 4) return null;
+  const [x1, y1, x2, y2] = value;
+  if (![x1, y1, x2, y2].every((item) => typeof item === "number" && Number.isFinite(item))) return null;
+  const rect = normalizePdfRect({ x1, y1, x2, y2 });
+  return rectHasArea(rect) ? rect : null;
+}
+
+function normalizeExternalLinkUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (normalized.length === 0) return null;
+  const lower = normalized.toLowerCase();
+  if (lower.startsWith("javascript:") || lower.startsWith("data:")) return null;
+  return normalized;
+}
+
+function isPdfLinkAnnotation(annotation: unknown): annotation is PdfLinkAnnotationLike {
+  if (!annotation || typeof annotation !== "object") return false;
+  const link = annotation as PdfLinkAnnotationLike;
+  return link.subtype === "Link"
+    || Array.isArray(link.dest)
+    || typeof link.dest === "string"
+    || typeof link.url === "string"
+    || typeof link.unsafeUrl === "string";
+}
+
+function normalizePdfPathKey(path: string | null | undefined): string | null {
+  if (typeof path !== "string") return null;
+  const normalized = path.trim();
+  if (normalized.length === 0) return null;
+  return normalized.replace(/\\/g, "/").toLowerCase();
+}
+
+function normalizePdfFontDisplayName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = normalizeOutlineTitle(value).replace(/^[A-Z]{6}\+/, "").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizePageOrder(pageOrder: number[], pageCount: number): number[] {
+  const seen = new Set<number>();
+  const normalized: number[] = [];
+  for (const pageNumber of pageOrder) {
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > pageCount || seen.has(pageNumber)) continue;
+    seen.add(pageNumber);
+    normalized.push(pageNumber);
+  }
+  return normalized;
+}
+
+function normalizeSelectedPages(selectedPages: Iterable<number>, pageCount: number): Set<number> {
+  const normalized = new Set<number>();
+  for (const pageNumber of selectedPages) {
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > pageCount) continue;
+    normalized.add(pageNumber);
+  }
+  return normalized;
+}
+
+type IdleTaskHandle = number;
+const PAGE_TEXT_SEARCH_CACHE_LIMIT = 24;
+const SEARCH_PROGRESS_YIELD_EVERY_PAGES = 2;
+const FONT_INFO_YIELD_EVERY_PAGES = 2;
+
+function scheduleIdleTask(callback: () => void, timeout = 300): IdleTaskHandle {
+  const idleWindow = window as Window & typeof globalThis & {
+    requestIdleCallback?: (cb: () => void, options?: { timeout?: number }) => number;
+  };
+  if (typeof idleWindow.requestIdleCallback === "function") {
+    return idleWindow.requestIdleCallback(() => callback(), { timeout });
+  }
+  return window.setTimeout(callback, Math.min(timeout, 120));
+}
+
+function cancelIdleTask(handle: IdleTaskHandle | null) {
+  if (handle === null) return;
+  const idleWindow = window as Window & typeof globalThis & {
+    cancelIdleCallback?: (id: number) => void;
+  };
+  if (typeof idleWindow.cancelIdleCallback === "function") {
+    idleWindow.cancelIdleCallback(handle);
+    return;
+  }
+  window.clearTimeout(handle);
+}
 
 function buildPersistedAppSettings(input: PersistedAppSettings): PersistedAppSettings {
   return input;
@@ -134,8 +255,11 @@ function App() {
   const [isGeneratingOutline, setIsGeneratingOutline] = useState(false);
   const [saveType, setSaveType] = useState<SaveType>("pdf");
   const [openExplorerAfterSave, setOpenExplorerAfterSave] = useState(true);
-  const [openPdfInNewWindow, setOpenPdfInNewWindow] = useState(true);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [draggingWorkspaceTabId, setDraggingWorkspaceTabId] = useState<string | null>(null);
+  const [workspaceTabDropTargetId, setWorkspaceTabDropTargetId] = useState<string | null>(null);
   const [quickSelectInput, setQuickSelectInput] = useState("");
   const [rangeFromInput, setRangeFromInput] = useState("");
   const [rangeToInput, setRangeToInput] = useState("");
@@ -160,8 +284,9 @@ function App() {
   const [showPdfInfoModal, setShowPdfInfoModal] = useState(false);
   const [pdfInfoTab, setPdfInfoTab] = useState<"metadata" | "fonts">("metadata");
   const [isLoadingPdfInfo, setIsLoadingPdfInfo] = useState(false);
+  const [pdfInfoLoadingText, setPdfInfoLoadingText] = useState("");
   const [pdfInfoMetadataFields, setPdfInfoMetadataFields] = useState<PdfInfoField[]>([]);
-  const [pdfInfoFontNames, setPdfInfoFontNames] = useState<string[]>([]);
+  const [pdfInfoFonts, setPdfInfoFonts] = useState<PdfFontInfo[]>([]);
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false);
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [hasHydratedStoredSettings, setHasHydratedStoredSettings] = useState(false);
@@ -175,6 +300,7 @@ function App() {
   const [previewPageSize, setPreviewPageSize] = useState({ width: 0, height: 0 });
   const [previewSecondaryPageSize, setPreviewSecondaryPageSize] = useState({ width: 0, height: 0 });
   const [previewTextSpans, setPreviewTextSpans] = useState<PreviewTextSpan[]>([]);
+  const [previewLinkOverlays, setPreviewLinkOverlays] = useState<PreviewLinkOverlay[]>([]);
   const [selectedPreviewText, setSelectedPreviewText] = useState("");
   const [isAreaSelectMode, setIsAreaSelectMode] = useState(false);
   const [isAreaSelecting, setIsAreaSelecting] = useState(false);
@@ -182,12 +308,13 @@ function App() {
   const [showSearchBar, setShowSearchBar] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<Array<{ pageNumber: number; spanIndex: number; text: string }>>([]);
+  const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const [isSearchingDocument, setIsSearchingDocument] = useState(false);
   const [previewZoom, setPreviewZoom] = useState(readStoredZoom);
   const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "manual">("fit");
   const [previewSpreadMode, setPreviewSpreadMode] = useState(false);
+  const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
   const [pageRotations, setPageRotations] = useState<Record<number, number>>({});
   const [isPreviewFocused, setIsPreviewFocused] = useState(false);
   const [isInitialPreviewReady, setIsInitialPreviewReady] = useState(false);
@@ -208,6 +335,10 @@ function App() {
   const [securityConfirmPassword, setSecurityConfirmPassword] = useState("");
   const [securityModalError, setSecurityModalError] = useState<string | null>(null);
   const [pendingProtectedPdfPath, setPendingProtectedPdfPath] = useState<string | null>(null);
+  const isE2EMode = useMemo(() => {
+    if (import.meta.env.MODE === "e2e") return true;
+    return new URLSearchParams(window.location.search).has("e2e");
+  }, []);
 
   const previewHostRef = useRef<HTMLDivElement | null>(null);
   const previewInteractionRef = useRef<HTMLDivElement | null>(null);
@@ -240,7 +371,9 @@ function App() {
   const progressivePageLoadTokenRef = useRef(0);
   const progressivePageLoadTimerRef = useRef<number | null>(null);
   const previewRenderCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const previewRenderCacheOrderRef = useRef<string[]>([]);
   const pageTextSearchCacheRef = useRef<Map<number, string[]>>(new Map());
+  const pageTextSearchCacheOrderRef = useRef<number[]>([]);
   const searchTokenRef = useRef(0);
   const pendingAiCitationJumpRef = useRef<{ pageNumber: number; query: string } | null>(null);
   const pageOverlaysRef = useRef<PdfPageOverlay[]>([]);
@@ -248,8 +381,15 @@ function App() {
   const secondaryPreviewViewportRef = useRef<ReturnType<PDFPageProxy["getViewport"]> | null>(null);
   const secondaryPreviewPageNumberRef = useRef<number | null>(null);
   const previewRenderGenerationRef = useRef(0);
-  const hasPrefetchedPdfInfoRef = useRef(false);
+  const tabPdfBytesRef = useRef<Map<string, Uint8Array>>(new Map());
+  const tabPageOverlaysRef = useRef<Map<string, PdfPageOverlay[]>>(new Map());
   const persistedSettingsRef = useRef<PersistedAppSettings | null>(null);
+  const switchingTabRef = useRef(false);
+  const sidebarSyncTimerRef = useRef<number | null>(null);
+  const pendingSidebarSyncPageRef = useRef<number | null>(null);
+  const previewPrefetchIdleRef = useRef<IdleTaskHandle | null>(null);
+  const thumbnailPrefetchIdleRef = useRef<IdleTaskHandle | null>(null);
+  const pdfInfoLoadTokenRef = useRef(0);
 
   const isBusy = isLoadingPdf || isSaving || isAddingPdf;
   const pageNumbers = useMemo(() => Array.from({ length: pageCount }, (_, i) => i + 1), [pageCount]);
@@ -305,10 +445,28 @@ function App() {
     () => (secondaryPreviewPageNumber ? pageOverlays.filter((overlay) => overlay.pageNumber === secondaryPreviewPageNumber) : []),
     [pageOverlays, secondaryPreviewPageNumber],
   );
+  const activePreviewLinks = useMemo(
+    () => previewLinkOverlays.filter((overlay) => overlay.pageNumber === activePage),
+    [activePage, previewLinkOverlays],
+  );
+  const secondaryPreviewLinks = useMemo(
+    () => (secondaryPreviewPageNumber ? previewLinkOverlays.filter((overlay) => overlay.pageNumber === secondaryPreviewPageNumber) : []),
+    [previewLinkOverlays, secondaryPreviewPageNumber],
+  );
   const activeSearchSpanIndex = useMemo(
     () => (activeSearchResult?.pageNumber === activePage ? activeSearchResult.spanIndex : null),
     [activePage, activeSearchResult],
   );
+  const previewRenderCacheLimit = useMemo(() => {
+    const spreadBonus = previewSpreadMode ? 2 : 0;
+    const viewportArea = previewSize.width * previewSize.height;
+    const areaBonus = viewportArea >= 3_000_000 ? 2 : viewportArea >= 1_600_000 ? 1 : 0;
+    const deviceMemory = typeof navigator !== "undefined" && typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === "number"
+      ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4
+      : 4;
+    const memoryBonus = deviceMemory >= 8 ? 2 : deviceMemory >= 4 ? 1 : 0;
+    return Math.max(6, Math.min(14, 6 + spreadBonus + areaBonus + memoryBonus));
+  }, [previewSize.height, previewSize.width, previewSpreadMode]);
   const statusText = useMemo(() => {
     if (status.type === "ready") return tr("", "");
     if (status.type === "loadingPdf") {
@@ -327,21 +485,84 @@ function App() {
     return tr("이미지 저장 실패", "Image save failed");
   }, [status, tr]);
 
+  const buildWorkspaceSnapshot = useCallback((): WorkspaceTabSnapshot | null => {
+    if (!pdfBytes) return null;
+    return {
+      pdfPath,
+      pageCount,
+      activePage,
+      pageInput,
+      pageOrder,
+      selectedPages: Array.from(selectedPages),
+      sidebarTab,
+      outlinePanelMode,
+      outlineEntries,
+      hasLoadedOutlineOnce,
+      quickSelectInput,
+      rangeFromInput,
+      rangeToInput,
+      isAreaSelectMode,
+      showSearchBar,
+      searchQuery,
+      debouncedSearchQuery,
+      pageRotations,
+      isCurrentPdfEncrypted,
+    };
+  }, [
+    activePage,
+    debouncedSearchQuery,
+    hasLoadedOutlineOnce,
+    isAreaSelectMode,
+    isCurrentPdfEncrypted,
+    outlineEntries,
+    outlinePanelMode,
+    pageCount,
+    pageInput,
+    pageOrder,
+    pageRotations,
+    pdfBytes,
+    pdfPath,
+    quickSelectInput,
+    rangeFromInput,
+    rangeToInput,
+    searchQuery,
+    selectedPages,
+    showSearchBar,
+    sidebarTab,
+  ]);
+
+  const persistWorkspaceTabSnapshot = useCallback((tabId: string | null) => {
+    if (!tabId || switchingTabRef.current) return;
+    const snapshot = buildWorkspaceSnapshot();
+    if (!snapshot) return;
+    if (pdfBytes) tabPdfBytesRef.current.set(tabId, pdfBytes);
+    tabPageOverlaysRef.current.set(tabId, pageOverlays.map((overlay) => ({ ...overlay })));
+    setWorkspaceTabs((prev) => updateWorkspaceTabSnapshot(prev, tabId, snapshot));
+  }, [buildWorkspaceSnapshot, pageOverlays, pdfBytes]);
+
+  const persistActiveTabSnapshot = useCallback(() => {
+    persistWorkspaceTabSnapshot(activeTabId);
+  }, [activeTabId, persistWorkspaceTabSnapshot]);
+
+  useEffect(() => {
+    persistActiveTabSnapshot();
+  }, [persistActiveTabSnapshot]);
+
   const currentPersistedSettings = useMemo(() => buildPersistedAppSettings({
     "app.locale": locale,
     "app.toolbarCollapsed": isToolbarCollapsed,
+    "app.sidebarTab": sidebarTab,
     "app.previewZoom": previewZoom,
     "app.previewZoomMode": previewZoomMode,
     "app.previewSpreadMode": previewSpreadMode,
     "app.openExplorerAfterSave": openExplorerAfterSave,
-    "app.openPdfInNewWindow": openPdfInNewWindow,
     "app.showShortcuts": showShortcuts,
     "ai.panelOpen": showAiPanel,
   }), [
     isToolbarCollapsed,
     locale,
     openExplorerAfterSave,
-    openPdfInNewWindow,
+    sidebarTab,
     previewSpreadMode,
     previewZoom,
     previewZoomMode,
@@ -357,16 +578,17 @@ function App() {
         const settings = bundle.settings;
         const storedLocale = settings["app.locale"];
         const storedToolbarCollapsed = settings["app.toolbarCollapsed"];
+        const storedSidebarTab = settings["app.sidebarTab"];
         const storedPreviewZoom = settings["app.previewZoom"];
         const storedPreviewZoomMode = settings["app.previewZoomMode"];
         const storedPreviewSpreadMode = settings["app.previewSpreadMode"];
         const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
-        const storedOpenPdfInNewWindow = settings["app.openPdfInNewWindow"];
         const storedShowShortcuts = settings["app.showShortcuts"];
         const storedAiPanelOpen = settings["ai.panelOpen"];
 
         if (storedLocale === "ko" || storedLocale === "en") setLocale(storedLocale);
         if (typeof storedToolbarCollapsed === "boolean") setIsToolbarCollapsed(storedToolbarCollapsed);
+        if (storedSidebarTab === "thumbnails" || storedSidebarTab === "outline") setSidebarTab(storedSidebarTab);
         if (typeof storedPreviewZoom === "number") {
           setPreviewZoom(clamp(Math.round(storedPreviewZoom), ZOOM_MIN, ZOOM_MAX));
         }
@@ -375,17 +597,16 @@ function App() {
         }
         if (typeof storedPreviewSpreadMode === "boolean") setPreviewSpreadMode(storedPreviewSpreadMode);
         if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
-        if (typeof storedOpenPdfInNewWindow === "boolean") setOpenPdfInNewWindow(storedOpenPdfInNewWindow);
         if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
         persistedSettingsRef.current = buildPersistedAppSettings({
           "app.locale": storedLocale === "ko" || storedLocale === "en" ? storedLocale : locale,
           "app.toolbarCollapsed": typeof storedToolbarCollapsed === "boolean" ? storedToolbarCollapsed : false,
+          "app.sidebarTab": storedSidebarTab === "thumbnails" || storedSidebarTab === "outline" ? storedSidebarTab : "thumbnails",
           "app.previewZoom": typeof storedPreviewZoom === "number" ? clamp(Math.round(storedPreviewZoom), ZOOM_MIN, ZOOM_MAX) : 100,
           "app.previewZoomMode": storedPreviewZoomMode === "fit" || storedPreviewZoomMode === "manual" ? storedPreviewZoomMode : "fit",
           "app.previewSpreadMode": typeof storedPreviewSpreadMode === "boolean" ? storedPreviewSpreadMode : false,
           "app.openExplorerAfterSave": typeof storedOpenExplorerAfterSave === "boolean" ? storedOpenExplorerAfterSave : true,
-          "app.openPdfInNewWindow": typeof storedOpenPdfInNewWindow === "boolean" ? storedOpenPdfInNewWindow : true,
           "app.showShortcuts": typeof storedShowShortcuts === "boolean" ? storedShowShortcuts : false,
           "ai.panelOpen": typeof storedAiPanelOpen === "boolean" ? storedAiPanelOpen : false,
         });
@@ -448,6 +669,17 @@ function App() {
   }, [pageOrder]);
 
   useEffect(() => {
+    setPageOrder((prev) => {
+      const normalized = normalizePageOrder(prev, pageCount);
+      if (normalized.length !== prev.length) return normalized;
+      for (let index = 0; index < prev.length; index += 1) {
+        if (normalized[index] !== prev[index]) return normalized;
+      }
+      return prev;
+    });
+  }, [pageCount, pageOrder]);
+
+  useEffect(() => {
     outlineEntriesRef.current = outlineEntries;
   }, [outlineEntries]);
 
@@ -458,6 +690,17 @@ function App() {
   useEffect(() => {
     selectedPagesRef.current = selectedPages;
   }, [selectedPages]);
+
+  useEffect(() => {
+    setSelectedPages((prev) => {
+      const normalized = normalizeSelectedPages(prev, pageCount);
+      if (normalized.size !== prev.size) return normalized;
+      for (const pageNumber of prev) {
+        if (!normalized.has(pageNumber)) return normalized;
+      }
+      return prev;
+    });
+  }, [pageCount]);
 
   const showToast = useCallback((text: string) => {
     setToastText(text);
@@ -495,16 +738,19 @@ function App() {
     });
   }, []);
 
-  const inspectCurrentPdfSecurity = useCallback(async (bytes: Uint8Array) => {
+  const inspectCurrentPdfSecurity = useCallback(async (bytes: Uint8Array, path?: string | null) => {
     try {
       const result = await invoke<InspectPdfSecurityResponse>("inspect_pdf_security", {
         request: {
-          pdfBytes: Array.from(bytes),
+          inputPath: path ?? null,
+          pdfBytes: path ? null : bytes,
         },
       });
       setIsCurrentPdfEncrypted(result.isEncrypted);
+      return result.isEncrypted;
     } catch {
       setIsCurrentPdfEncrypted(false);
+      return false;
     }
   }, []);
 
@@ -617,6 +863,59 @@ function App() {
     return null;
   }), [getPreviewOverlayStyle]);
 
+  const handlePreviewLinkClick = useCallback(async (overlay: PreviewLinkOverlay) => {
+    if (overlay.kind === "internal") {
+      if (!overlay.targetPageNumber || pageCount === 0) return;
+      setActivePage(clamp(overlay.targetPageNumber, 1, pageCount));
+      focusPreviewArea();
+      return;
+    }
+    if (!overlay.url) return;
+    try {
+      if (isTauriRuntime()) {
+        await openUrl(overlay.url);
+      } else {
+        window.open(overlay.url, "_blank", "noopener,noreferrer");
+      }
+      focusPreviewArea();
+    } catch (error) {
+      setErrorText(`${tr("외부 링크 열기 실패", "Failed to open external link")}: ${formatError(error)}`);
+    }
+  }, [focusPreviewArea, pageCount, tr]);
+
+  const renderPreviewLinkNodes = useCallback((
+    overlays: PreviewLinkOverlay[],
+    viewport: ReturnType<PDFPageProxy["getViewport"]> | null,
+  ) => overlays.map((overlay) => {
+    const rect = convertPdfRectToViewportRect(viewport, overlay.rect);
+    if (!rect) return null;
+    const title = overlay.kind === "internal"
+      ? tr(`페이지 ${overlay.targetPageNumber ?? ""}로 이동`, `Jump to page ${overlay.targetPageNumber ?? ""}`)
+      : overlay.url ?? tr("외부 링크 열기", "Open external link");
+    return (
+      <button
+        key={overlay.id}
+        className={`preview-link-overlay ${overlay.kind} ${isAreaSelectMode ? "disabled" : ""}`}
+        type="button"
+        style={{
+          left: `${rect.left}px`,
+          top: `${rect.top}px`,
+          width: `${Math.max(1, rect.width)}px`,
+          height: `${Math.max(1, rect.height)}px`,
+        }}
+        title={title}
+        aria-label={title}
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (isAreaSelectMode) return;
+          void handlePreviewLinkClick(overlay);
+        }}
+      />
+    );
+  }), [convertPdfRectToViewportRect, handlePreviewLinkClick, isAreaSelectMode, tr]);
+
   const buildAiCitationSearchQuery = useCallback((text: string) => {
     const tokens = normalizeSearchQuery(text)
       .split(" ")
@@ -642,6 +941,8 @@ function App() {
   }, [previewSpreadMode]);
 
   const clearThumbnailPipeline = useCallback(() => {
+    cancelIdleTask(thumbnailPrefetchIdleRef.current);
+    thumbnailPrefetchIdleRef.current = null;
     for (const url of Object.values(thumbnailUrlsRef.current)) URL.revokeObjectURL(url);
     thumbnailUrlsRef.current = {};
     thumbnailOrderRef.current = [];
@@ -662,6 +963,73 @@ function App() {
     }
   }, []);
 
+  const touchPreviewRenderCacheKey = useCallback((key: string) => {
+    previewRenderCacheOrderRef.current = [
+      ...previewRenderCacheOrderRef.current.filter((entry) => entry !== key),
+      key,
+    ];
+  }, []);
+
+  const getPreviewRenderCacheCanvas = useCallback((key: string) => {
+    const cached = previewRenderCacheRef.current.get(key);
+    if (!cached) return null;
+    touchPreviewRenderCacheKey(key);
+    return cached;
+  }, [touchPreviewRenderCacheKey]);
+
+  const setPreviewRenderCacheCanvas = useCallback((key: string, canvas: HTMLCanvasElement) => {
+    previewRenderCacheRef.current.set(key, canvas);
+    touchPreviewRenderCacheKey(key);
+    while (previewRenderCacheOrderRef.current.length > previewRenderCacheLimit) {
+      const evictKey = previewRenderCacheOrderRef.current.shift();
+      if (!evictKey) break;
+      const evicted = previewRenderCacheRef.current.get(evictKey);
+      if (evicted) {
+        evicted.width = 0;
+        evicted.height = 0;
+      }
+      previewRenderCacheRef.current.delete(evictKey);
+    }
+  }, [previewRenderCacheLimit, touchPreviewRenderCacheKey]);
+
+  const clearPreviewRenderCache = useCallback(() => {
+    previewRenderCacheRef.current.forEach((canvas) => {
+      canvas.width = 0;
+      canvas.height = 0;
+    });
+    previewRenderCacheRef.current.clear();
+    previewRenderCacheOrderRef.current = [];
+  }, []);
+
+  const touchPageTextSearchCacheKey = useCallback((pageNumber: number) => {
+    pageTextSearchCacheOrderRef.current = [
+      ...pageTextSearchCacheOrderRef.current.filter((entry) => entry !== pageNumber),
+      pageNumber,
+    ];
+  }, []);
+
+  const getPageTextSearchCacheItems = useCallback((pageNumber: number) => {
+    const cached = pageTextSearchCacheRef.current.get(pageNumber);
+    if (!cached) return null;
+    touchPageTextSearchCacheKey(pageNumber);
+    return cached;
+  }, [touchPageTextSearchCacheKey]);
+
+  const setPageTextSearchCacheItems = useCallback((pageNumber: number, items: string[]) => {
+    pageTextSearchCacheRef.current.set(pageNumber, items);
+    touchPageTextSearchCacheKey(pageNumber);
+    while (pageTextSearchCacheOrderRef.current.length > PAGE_TEXT_SEARCH_CACHE_LIMIT) {
+      const evictPage = pageTextSearchCacheOrderRef.current.shift();
+      if (evictPage === undefined) break;
+      pageTextSearchCacheRef.current.delete(evictPage);
+    }
+  }, [touchPageTextSearchCacheKey]);
+
+  const clearPageTextSearchCache = useCallback(() => {
+    pageTextSearchCacheRef.current.clear();
+    pageTextSearchCacheOrderRef.current = [];
+  }, []);
+
   const clearPreviewCanvas = useCallback(() => {
     const canvas = previewCanvasRef.current;
     const secondaryCanvas = previewCanvasSecondaryRef.current;
@@ -680,6 +1048,7 @@ function App() {
     setPreviewPageSize({ width: 0, height: 0 });
     setPreviewSecondaryPageSize({ width: 0, height: 0 });
     setPreviewTextSpans([]);
+    setPreviewLinkOverlays([]);
     setSelectedPreviewText("");
     setPreviewSelectionRect(null);
     setIsAreaSelecting(false);
@@ -715,13 +1084,16 @@ function App() {
 
   useEffect(() => {
     const viewport = thumbViewportRef.current;
-    if (!viewport) return;
+    if (!viewport || sidebarTab !== "thumbnails") {
+      setThumbViewportHeight(0);
+      return;
+    }
     const update = () => setThumbViewportHeight(viewport.clientHeight);
     update();
     const observer = new ResizeObserver(update);
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, []);
+  }, [sidebarTab]);
 
   useEffect(() => () => {
     cancelProgressivePageLoad();
@@ -729,6 +1101,12 @@ function App() {
     revokeOverlayUrls(pageOverlaysRef.current);
     if (pdfDocRef.current) void pdfDocRef.current.destroy();
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    if (sidebarSyncTimerRef.current !== null) window.clearTimeout(sidebarSyncTimerRef.current);
+    cancelIdleTask(previewPrefetchIdleRef.current);
+    cancelIdleTask(thumbnailPrefetchIdleRef.current);
+    pdfInfoLoadTokenRef.current += 1;
+    tabPdfBytesRef.current.clear();
+    tabPageOverlaysRef.current.clear();
   }, [cancelProgressivePageLoad, clearThumbnailPipeline, revokeOverlayUrls]);
 
   const hydratePageListInBackground = useCallback((totalPages: number) => {
@@ -1190,7 +1568,15 @@ function App() {
       if (afterIndex >= 0 && afterIndex < pageOrder.length) prefetch.push(pageOrder[afterIndex]);
       if (beforeIndex >= 0 && beforeIndex < pageOrder.length) prefetch.push(pageOrder[beforeIndex]);
     }
-    enqueueThumbnailPages(prefetch, false);
+    cancelIdleTask(thumbnailPrefetchIdleRef.current);
+    thumbnailPrefetchIdleRef.current = scheduleIdleTask(() => {
+      enqueueThumbnailPages(prefetch, false);
+      thumbnailPrefetchIdleRef.current = null;
+    }, 240);
+    return () => {
+      cancelIdleTask(thumbnailPrefetchIdleRef.current);
+      thumbnailPrefetchIdleRef.current = null;
+    };
   }, [pdfDoc, pageCount, isInitialPreviewReady, activePage, visiblePageNumbers, visibleEndIndex, visibleStartIndex, pageOrder, enqueueThumbnailPages]);
 
   const drawCachedPreviewCanvas = useCallback((target: HTMLCanvasElement, source: HTMLCanvasElement, width: number, height: number) => {
@@ -1212,7 +1598,7 @@ function App() {
     for (const target of pages) {
       if (target.pageNumber < 1 || target.pageNumber > doc.numPages) continue;
       const key = buildPreviewCacheKey(target.pageNumber, target.rotation, target.scale);
-      if (previewRenderCacheRef.current.has(key)) continue;
+      if (getPreviewRenderCacheCanvas(key)) continue;
       try {
         const page = await doc.getPage(target.pageNumber);
         const viewport = page.getViewport({ scale: target.scale, rotation: target.rotation });
@@ -1226,22 +1612,22 @@ function App() {
         context.clearRect(0, 0, viewport.width, viewport.height);
         const task = page.render({ canvasContext: context, viewport, intent: "display" });
         await task.promise;
-        previewRenderCacheRef.current.set(key, cachedCanvas);
+        setPreviewRenderCacheCanvas(key, cachedCanvas);
       } catch {
         // Ignore prefetch failures; foreground render still handles actual display.
       }
     }
-  }, []);
+  }, [getPreviewRenderCacheCanvas, setPreviewRenderCacheCanvas]);
 
   const loadPageSearchItems = useCallback(async (doc: PDFDocumentProxy, pageNumber: number) => {
-    const cached = pageTextSearchCacheRef.current.get(pageNumber);
+    const cached = getPageTextSearchCacheItems(pageNumber);
     if (cached) return cached;
     const page = await doc.getPage(pageNumber);
     const textContent = await page.getTextContent();
     const items = buildSearchableTextSpans(textContent.items);
-    pageTextSearchCacheRef.current.set(pageNumber, items);
+    setPageTextSearchCacheItems(pageNumber, items);
     return items;
-  }, []);
+  }, [getPageTextSearchCacheItems, setPageTextSearchCacheItems]);
 
   useEffect(() => {
     if (!pdfDoc || previewSize.width < 40 || previewSize.height < 40) return;
@@ -1265,8 +1651,10 @@ function App() {
         const base = page.getViewport({ scale: 1, rotation });
         const secondaryBase = secondaryPage ? secondaryPage.getViewport({ scale: 1, rotation: secondaryRotation }) : null;
         const spreadGap = secondaryBase ? 12 : 0;
-        const fitW = Math.max(previewSize.width - 24, 140);
-        const fitH = Math.max(previewSize.height - 64, 140);
+        const horizontalPadding = isPreviewFullscreen ? 8 : 24;
+        const verticalPadding = isPreviewFullscreen ? 8 : 64;
+        const fitW = Math.max(previewSize.width - horizontalPadding, 140);
+        const fitH = Math.max(previewSize.height - verticalPadding, 140);
         const targetWidth = secondaryBase ? base.width + spreadGap + secondaryBase.width : base.width;
         const targetHeight = secondaryBase ? Math.max(base.height, secondaryBase.height) : base.height;
         const fitScale = Math.max(0.1, Math.min(fitW / targetWidth, fitH / targetHeight));
@@ -1280,7 +1668,7 @@ function App() {
         secondaryPreviewPageNumberRef.current = secondaryPageNumber;
         const dpr = window.devicePixelRatio || 1;
         const cacheKey = buildPreviewCacheKey(activePage, rotation, cssScale);
-        const cachedPrimary = previewRenderCacheRef.current.get(cacheKey);
+        const cachedPrimary = getPreviewRenderCacheCanvas(cacheKey);
         if (cachedPrimary) {
           drawCachedPreviewCanvas(canvas, cachedPrimary, viewport.width, viewport.height);
         } else {
@@ -1299,11 +1687,11 @@ function App() {
           cachedCanvas.height = canvas.height;
           const cachedContext = cachedCanvas.getContext("2d", { alpha: false });
           if (cachedContext) cachedContext.drawImage(canvas, 0, 0);
-          previewRenderCacheRef.current.set(cacheKey, cachedCanvas);
+          setPreviewRenderCacheCanvas(cacheKey, cachedCanvas);
         }
         if (secondaryCanvas && secondaryViewport && secondaryPage) {
           const secondaryCacheKey = buildPreviewCacheKey(secondaryPageNumber ?? activePage, secondaryRotation, cssScale);
-          const cachedSecondary = previewRenderCacheRef.current.get(secondaryCacheKey);
+          const cachedSecondary = getPreviewRenderCacheCanvas(secondaryCacheKey);
           if (cachedSecondary) {
             drawCachedPreviewCanvas(secondaryCanvas, cachedSecondary, secondaryViewport.width, secondaryViewport.height);
           } else {
@@ -1322,7 +1710,7 @@ function App() {
             cachedCanvas.height = secondaryCanvas.height;
             const cachedContext = cachedCanvas.getContext("2d", { alpha: false });
             if (cachedContext) cachedContext.drawImage(secondaryCanvas, 0, 0);
-            previewRenderCacheRef.current.set(secondaryCacheKey, cachedCanvas);
+            setPreviewRenderCacheCanvas(secondaryCacheKey, cachedCanvas);
           }
         } else if (secondaryCanvas) {
           secondaryCanvas.width = 0;
@@ -1343,14 +1731,53 @@ function App() {
             : { width: 0, height: 0 },
         );
         setPreviewTextSpans([]);
+        setPreviewLinkOverlays([]);
         setSelectedPreviewText("");
         setPreviewSelectionRect(null);
         textLayerTimer = window.setTimeout(async () => {
           try {
-            const textContent = await page.getTextContent();
+            const buildPageLinkOverlays = async (targetPage: PDFPageProxy, pageNumber: number): Promise<PreviewLinkOverlay[]> => {
+              const annotations = await targetPage.getAnnotations();
+              const nextLinks: Array<PreviewLinkOverlay | null> = await Promise.all(annotations.map(async (annotation, index) => {
+                if (!isPdfLinkAnnotation(annotation)) return null;
+                const rect = parseLinkAnnotationRect(annotation.rect);
+                if (!rect) return null;
+                const externalUrl = normalizeExternalLinkUrl(annotation.url) ?? normalizeExternalLinkUrl(annotation.unsafeUrl);
+                if (externalUrl) {
+                  return {
+                    id: `external:${pageNumber}:${index}:${externalUrl}`,
+                    pageNumber,
+                    rect,
+                    kind: "external" as const,
+                    url: externalUrl,
+                  };
+                }
+                if (annotation.dest) {
+                  const targetPageNumber = await resolveOutlinePageNumber(pdfDoc, annotation.dest);
+                  if (!targetPageNumber || targetPageNumber < 1 || targetPageNumber > pdfDoc.numPages) return null;
+                  return {
+                    id: `internal:${pageNumber}:${index}:${targetPageNumber}`,
+                    pageNumber,
+                    rect,
+                    kind: "internal" as const,
+                    targetPageNumber,
+                  };
+                }
+                return null;
+              }));
+              return nextLinks.filter((item): item is PreviewLinkOverlay => item !== null);
+            };
+            const [textContent, primaryLinks, secondaryLinks] = await Promise.all([
+              isPreviewFullscreen ? Promise.resolve(null) : page.getTextContent(),
+              buildPageLinkOverlays(page, activePage),
+              secondaryPage && secondaryPageNumber ? buildPageLinkOverlays(secondaryPage, secondaryPageNumber) : Promise.resolve([]),
+            ]);
             if (cancelled || renderGeneration !== previewRenderGenerationRef.current) return;
 
-            setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale, textContent.styles as Record<string, { fontFamily?: string }>));
+            if (textContent) {
+              setPreviewTextSpans(buildPreviewTextSpans(textContent.items, viewport.transform, viewport.scale, textContent.styles as Record<string, { fontFamily?: string }>));
+            }
+            setPreviewLinkOverlays([...primaryLinks, ...secondaryLinks]);
           } catch (error) {
             const known = error as { name?: string; message?: string };
             console.error("PDF.js 텍스트 레이어 로딩 에러:", error);
@@ -1369,16 +1796,19 @@ function App() {
           setIsInitialPreviewReady(true);
           setStatus({ type: "loaded", pages: pdfDoc.numPages });
         }
-        void prefetchPreviewPages(
-          pdfDoc,
-          [activePage - 1, activePage + 1, activePage + 2]
-            .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
-            .map((pageNumber) => ({
-              pageNumber,
-              rotation: pageRotationsRef.current[pageNumber] ?? 0,
-              scale: cssScale,
-            })),
-        );
+        cancelIdleTask(previewPrefetchIdleRef.current);
+        previewPrefetchIdleRef.current = scheduleIdleTask(() => {
+          void prefetchPreviewPages(
+            pdfDoc,
+            [activePage - 1, activePage + 1, activePage + 2]
+              .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
+              .map((pageNumber) => ({
+                pageNumber,
+                rotation: pageRotationsRef.current[pageNumber] ?? 0,
+                scale: cssScale,
+              })),
+          );
+        }, 220);
       } catch (error) {
         const known = error as { name?: string };
         if (
@@ -1397,8 +1827,10 @@ function App() {
       if (textLayerTimer !== null) window.clearTimeout(textLayerTimer);
       if (renderTask) renderTask.cancel();
       if (secondaryRenderTask) secondaryRenderTask.cancel();
+      cancelIdleTask(previewPrefetchIdleRef.current);
+      previewPrefetchIdleRef.current = null;
     };
-  }, [drawCachedPreviewCanvas, pdfDoc, activePage, pageCount, pageRotations, prefetchPreviewPages, previewSize, previewSpreadMode, previewZoom, previewZoomMode, isInitialPreviewReady, tr]);
+  }, [drawCachedPreviewCanvas, getPreviewRenderCacheCanvas, pdfDoc, activePage, pageCount, pageRotations, prefetchPreviewPages, previewSize, previewSpreadMode, previewZoom, previewZoomMode, isInitialPreviewReady, isPreviewFullscreen, setPreviewRenderCacheCanvas, tr]);
 
   useEffect(() => {
     if (!isInitialPreviewReady || pendingHydrationPageCount <= 1) return;
@@ -1415,22 +1847,28 @@ function App() {
       return;
     }
     let cancelled = false;
+    let yieldHandle: IdleTaskHandle | null = null;
     const token = searchTokenRef.current + 1;
     searchTokenRef.current = token;
     setIsSearchingDocument(true);
     void (async () => {
-      const results: Array<{ pageNumber: number; spanIndex: number; text: string }> = [];
+      const results: SearchResultItem[] = [];
       for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
         if (cancelled || searchTokenRef.current !== token) return;
         const items = await loadPageSearchItems(pdfDoc, pageNumber);
         items.forEach((text, spanIndex) => {
           if (normalizeSearchQuery(text).includes(normalizedSearchQuery)) {
-            results.push({ pageNumber, spanIndex, text });
+            results.push({ pageNumber, spanIndex });
           }
         });
-        if (pageNumber % 4 === 0) {
+        if (pageNumber % SEARCH_PROGRESS_YIELD_EVERY_PAGES === 0) {
           setSearchResults([...results]);
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          await new Promise<void>((resolve) => {
+            yieldHandle = scheduleIdleTask(() => {
+              yieldHandle = null;
+              resolve();
+            }, 90);
+          });
         }
       }
       if (cancelled || searchTokenRef.current !== token) return;
@@ -1444,34 +1882,45 @@ function App() {
     });
     return () => {
       cancelled = true;
+      cancelIdleTask(yieldHandle);
     };
   }, [loadPageSearchItems, normalizedSearchQuery, pdfDoc, tr]);
 
   useEffect(() => {
     const pendingJump = pendingAiCitationJumpRef.current;
     if (!pendingJump || searchResults.length === 0) return;
-    const targetIndex = searchResults.findIndex((result) => (
-      result.pageNumber === pendingJump.pageNumber
-      && normalizeSearchQuery(result.text).includes(pendingJump.query)
-    ));
-    const fallbackIndex = searchResults.findIndex((result) => result.pageNumber === pendingJump.pageNumber);
-    const nextIndex = targetIndex >= 0 ? targetIndex : fallbackIndex;
-    if (nextIndex < 0) return;
-    const target = searchResults[nextIndex];
-    pendingAiCitationJumpRef.current = null;
-    setActivePage(target.pageNumber);
-    setActiveSearchResultIndex(nextIndex);
-    focusPreviewArea();
-  }, [focusPreviewArea, searchResults]);
+    if (!pdfDoc) return;
+    let cancelled = false;
+    void (async () => {
+      const pageMatches = searchResults
+        .map((result, index) => ({ result, index }))
+        .filter(({ result }) => result.pageNumber === pendingJump.pageNumber);
+      if (pageMatches.length === 0) return;
+      const items = await loadPageSearchItems(pdfDoc, pendingJump.pageNumber);
+      if (cancelled) return;
+      const targetMatch = pageMatches.find(({ result }) => {
+        const text = items[result.spanIndex] ?? "";
+        return normalizeSearchQuery(text).includes(pendingJump.query);
+      }) ?? pageMatches[0];
+      pendingAiCitationJumpRef.current = null;
+      setActivePage(targetMatch.result.pageNumber);
+      setActiveSearchResultIndex(targetMatch.index);
+      focusPreviewArea();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [focusPreviewArea, loadPageSearchItems, pdfDoc, searchResults]);
 
-  const resetPdfWorkspace = useCallback(async () => {
+  const resetPdfWorkspace = useCallback(async (options?: { revokeOverlayUrls?: boolean }) => {
+    const shouldRevokeOverlayUrls = options?.revokeOverlayUrls ?? true;
     cancelProgressivePageLoad();
-    previewRenderCacheRef.current.clear();
-    pageTextSearchCacheRef.current.clear();
+    clearPreviewRenderCache();
+    clearPageTextSearchCache();
     searchTokenRef.current += 1;
     clearOutlineDragState();
     clearThumbnailPipeline();
-    revokeOverlayUrls(pageOverlaysRef.current);
+    if (shouldRevokeOverlayUrls) revokeOverlayUrls(pageOverlaysRef.current);
     pageOverlaysRef.current = [];
     await replacePdfDocument(null);
     clearPreviewCanvas();
@@ -1482,7 +1931,6 @@ function App() {
     setActivePage(1);
     setPageInput("1");
     setSelectedPages(new Set());
-    setSidebarTab("thumbnails");
     setOutlinePanelMode("view");
     setOutlineEntries([]);
     setHasLoadedOutlineOnce(false);
@@ -1490,8 +1938,11 @@ function App() {
     setIsGeneratingOutline(false);
     setShowPdfInfoModal(false);
     setPdfInfoTab("metadata");
+    pdfInfoLoadTokenRef.current += 1;
+    setIsLoadingPdfInfo(false);
+    setPdfInfoLoadingText("");
     setPdfInfoMetadataFields([]);
-    setPdfInfoFontNames([]);
+    setPdfInfoFonts([]);
     setQuickSelectInput("");
     setRangeFromInput("");
     setRangeToInput("");
@@ -1514,42 +1965,130 @@ function App() {
       setSecurityConfirmPassword("");
       setSecurityModalError(null);
       setPendingProtectedPdfPath(null);
-  }, [cancelProgressivePageLoad, clearOutlineDragState, clearPreviewCanvas, clearThumbnailPipeline, replacePdfDocument, revokeOverlayUrls]);
+  }, [cancelProgressivePageLoad, clearOutlineDragState, clearPageTextSearchCache, clearPreviewCanvas, clearPreviewRenderCache, clearThumbnailPipeline, replacePdfDocument, revokeOverlayUrls]);
 
-  const loadPdfFromPath = useCallback(async (path: string, password?: string) => {
+  const applyWorkspaceSnapshot = useCallback(async (
+    tabId: string | null,
+    snapshot: WorkspaceTabSnapshot | null,
+    preloadedDoc?: PDFDocumentProxy,
+  ) => {
+    switchingTabRef.current = true;
+    try {
+      if (!snapshot) {
+        await resetPdfWorkspace();
+        setStatus({ type: "ready" });
+        return;
+      }
+
+      const snapshotBytes = tabId ? (tabPdfBytesRef.current.get(tabId) ?? null) : null;
+      const snapshotPageOverlays = tabId ? (tabPageOverlaysRef.current.get(tabId) ?? []) : [];
+      if (!snapshotBytes) {
+        await resetPdfWorkspace();
+        setStatus({ type: "ready" });
+        return;
+      }
+
+      const loadedDoc = preloadedDoc ?? await getDocument({ data: cloneBytes(snapshotBytes) }).promise;
+      await resetPdfWorkspace({ revokeOverlayUrls: false });
+      await replacePdfDocument(loadedDoc);
+      const normalizedPageOrder = normalizePageOrder(snapshot.pageOrder, snapshot.pageCount);
+      const normalizedSelectedPages = normalizeSelectedPages(snapshot.selectedPages, snapshot.pageCount);
+      setPdfPath(snapshot.pdfPath);
+      setPdfBytes(snapshotBytes);
+      setPageCount(snapshot.pageCount);
+      setPageOrder(normalizedPageOrder);
+      setActivePage(snapshot.activePage);
+      setPageInput(snapshot.pageInput);
+      setSelectedPages(normalizedSelectedPages);
+      setSidebarTab(snapshot.sidebarTab);
+      setOutlinePanelMode(snapshot.outlinePanelMode);
+      setOutlineEntries(snapshot.outlineEntries.map((entry) => ({ ...entry })));
+      setHasLoadedOutlineOnce(snapshot.hasLoadedOutlineOnce);
+      setQuickSelectInput(snapshot.quickSelectInput);
+      setRangeFromInput(snapshot.rangeFromInput);
+      setRangeToInput(snapshot.rangeToInput);
+      setIsAreaSelectMode(snapshot.isAreaSelectMode);
+      setShowSearchBar(snapshot.showSearchBar);
+      setSearchQuery(snapshot.searchQuery);
+      setDebouncedSearchQuery(snapshot.debouncedSearchQuery);
+      setSearchResults([]);
+      setActiveSearchResultIndex(0);
+      setPageRotations({ ...snapshot.pageRotations });
+      pageRotationsRef.current = { ...snapshot.pageRotations };
+      setPageOverlays(snapshotPageOverlays.map((overlay) => ({ ...overlay })));
+      pageOverlaysRef.current = snapshotPageOverlays.map((overlay) => ({ ...overlay }));
+      setIsCurrentPdfEncrypted(snapshot.isCurrentPdfEncrypted);
+      setPendingHydrationPageCount(normalizedPageOrder.length >= snapshot.pageCount ? 0 : snapshot.pageCount);
+      setIsInitialPreviewReady(false);
+      setPendingProtectedPdfPath(null);
+      setStatus({ type: "loadingPdf", phase: "firstPage" });
+    } finally {
+      switchingTabRef.current = false;
+    }
+  }, [replacePdfDocument, resetPdfWorkspace]);
+
+  const openPdfBytesInTab = useCallback(async (
+    fileBytes: Uint8Array,
+    options?: { activate?: boolean; password?: string; path?: string | null; title?: string | null },
+  ) => {
+    const activate = options?.activate ?? true;
+    const password = options?.password;
+    const path = options?.path ?? null;
+    const title = options?.title?.trim() || path?.split(/[\\/]/).pop() || "PDF";
+    const normalizedTargetPath = normalizePdfPathKey(path);
+    const existingTab = normalizedTargetPath
+      ? workspaceTabs.find((tab) => normalizePdfPathKey(tab.snapshot.pdfPath) === normalizedTargetPath)
+      : null;
+    if (existingTab) {
+      if (activate) {
+        persistWorkspaceTabSnapshot(activeTabId);
+        setErrorText(null);
+        await applyWorkspaceSnapshot(existingTab.id, existingTab.snapshot);
+        setActiveTabId(existingTab.id);
+      }
+      return true;
+    }
+    persistWorkspaceTabSnapshot(activeTabId);
     setIsLoadingPdf(true);
     setStatus({ type: "loadingPdf", phase: "reading" });
     try {
       setStatus({ type: "loadingPdf", phase: "reading" });
-      const fileBytes = new Uint8Array(await readFile(path));
       const previewBytes = cloneBytes(fileBytes);
       const stateBytes = cloneBytes(fileBytes);
       setStatus({ type: "loadingPdf", phase: "opening" });
       const task = getDocument({ data: previewBytes, password });
       const loadedDoc = await task.promise;
-      await resetPdfWorkspace();
-      await replacePdfDocument(loadedDoc);
-      setPdfPath(path);
-      setPdfBytes(stateBytes);
-      await inspectCurrentPdfSecurity(stateBytes);
-      setPageCount(loadedDoc.numPages);
-      setPageOrder(loadedDoc.numPages > 0 ? [1] : []);
-      setActivePage(1);
-      setPageInput("1");
-      setSelectedPages(loadedDoc.numPages > 0 ? new Set([1]) : new Set());
-      setSidebarTab("thumbnails");
-      setOutlinePanelMode("view");
-      setOutlineEntries([]);
-      setHasLoadedOutlineOnce(false);
-      setRangeFromInput("");
-      setRangeToInput("");
-      setIsAreaSelectMode(false);
-      setIsInitialPreviewReady(false);
-      setPendingHydrationPageCount(loadedDoc.numPages);
-      setPageRotations({});
-      pageRotationsRef.current = {};
-      setPendingProtectedPdfPath(null);
-      setStatus({ type: "loadingPdf", phase: "firstPage" });
+      const encrypted = await inspectCurrentPdfSecurity(stateBytes, path);
+      const snapshot: WorkspaceTabSnapshot = {
+        pdfPath: path,
+        pageCount: loadedDoc.numPages,
+        activePage: 1,
+        pageInput: "1",
+        pageOrder: Array.from({ length: loadedDoc.numPages }, (_, index) => index + 1),
+        selectedPages: Array.from({ length: loadedDoc.numPages }, (_, index) => index + 1),
+        sidebarTab,
+        outlinePanelMode: "view",
+        outlineEntries: [],
+        hasLoadedOutlineOnce: false,
+        quickSelectInput: "",
+        rangeFromInput: "",
+        rangeToInput: "",
+        isAreaSelectMode: false,
+        showSearchBar: false,
+        searchQuery: "",
+        debouncedSearchQuery: "",
+        pageRotations: {},
+        isCurrentPdfEncrypted: encrypted,
+      };
+      const tabId = createExportUuid();
+      tabPdfBytesRef.current.set(tabId, stateBytes);
+      tabPageOverlaysRef.current.set(tabId, []);
+      const nextTab = buildWorkspaceTab(tabId, snapshot, title);
+      setWorkspaceTabs((prev) => [...prev, nextTab]);
+      if (activate) {
+        await applyWorkspaceSnapshot(tabId, snapshot, loadedDoc);
+        setActiveTabId(tabId);
+      }
       return true;
     } catch (error) {
       if (isPdfPasswordRequiredError(error)) {
@@ -1571,7 +2110,60 @@ function App() {
     } finally {
       setIsLoadingPdf(false);
     }
-  }, [inspectCurrentPdfSecurity, isPdfPasswordRequiredError, replacePdfDocument, resetPdfWorkspace, tr]);
+  }, [activeTabId, applyWorkspaceSnapshot, inspectCurrentPdfSecurity, isPdfPasswordRequiredError, persistWorkspaceTabSnapshot, sidebarTab, tr, workspaceTabs]);
+
+  const activateWorkspaceTab = useCallback(async (tabId: string) => {
+    if (tabId === activeTabId) return;
+    const targetTab = workspaceTabs.find((tab) => tab.id === tabId);
+    if (!targetTab) return;
+    persistWorkspaceTabSnapshot(activeTabId);
+    setErrorText(null);
+    await applyWorkspaceSnapshot(targetTab.id, targetTab.snapshot);
+    setActiveTabId(targetTab.id);
+  }, [activeTabId, applyWorkspaceSnapshot, persistWorkspaceTabSnapshot, workspaceTabs]);
+
+  const openPdfInTab = useCallback(async (path: string, options?: { activate?: boolean; password?: string }) => {
+    const fileBytes = new Uint8Array(await readFile(path));
+    return openPdfBytesInTab(fileBytes, {
+      activate: options?.activate,
+      password: options?.password,
+      path,
+    });
+  }, [openPdfBytesInTab]);
+
+  const switchToWorkspaceTab = useCallback(async (tabId: string) => {
+    await activateWorkspaceTab(tabId);
+  }, [activateWorkspaceTab]);
+
+  const closeWorkspaceTab = useCallback(async (tabId: string) => {
+    persistWorkspaceTabSnapshot(activeTabId);
+    const closingIndex = workspaceTabs.findIndex((tab) => tab.id === tabId);
+    if (closingIndex < 0) return;
+    const remainingTabs = workspaceTabs.filter((tab) => tab.id !== tabId);
+    const fallbackTab = activeTabId === tabId
+      ? remainingTabs[Math.min(closingIndex, remainingTabs.length - 1)] ?? null
+      : null;
+
+    setWorkspaceTabs(remainingTabs);
+    tabPdfBytesRef.current.delete(tabId);
+    revokeOverlayUrls(tabPageOverlaysRef.current.get(tabId) ?? []);
+    tabPageOverlaysRef.current.delete(tabId);
+
+    if (activeTabId !== tabId) return;
+    if (fallbackTab) {
+      await applyWorkspaceSnapshot(fallbackTab.id, fallbackTab.snapshot);
+      setActiveTabId(fallbackTab.id);
+      return;
+    }
+
+    setActiveTabId(null);
+    await resetPdfWorkspace();
+    setStatus({ type: "ready" });
+  }, [activeTabId, applyWorkspaceSnapshot, persistWorkspaceTabSnapshot, resetPdfWorkspace, revokeOverlayUrls, workspaceTabs]);
+
+  const moveWorkspaceTab = useCallback((sourceTabId: string, targetTabId: string) => {
+    setWorkspaceTabs((prev) => reorderWorkspaceTabs(prev, sourceTabId, targetTabId));
+  }, []);
 
   const handleOpenPdf = useCallback(async () => {
     setErrorText(null);
@@ -1582,8 +2174,8 @@ function App() {
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
     if (!selected || Array.isArray(selected)) return;
-    await loadPdfFromPath(selected);
-  }, [loadPdfFromPath, tr]);
+    await openPdfInTab(selected, { activate: true });
+  }, [openPdfInTab, tr]);
 
   const handleDroppedImagesOnPreview = useCallback(async (
     paths: string[],
@@ -1681,9 +2273,16 @@ function App() {
   ) => {
     const pdfPaths = paths.filter(isPdfFilePath);
     if (pdfPaths.length > 0) {
-      await loadPdfFromPath(pdfPaths[0]);
+      for (const [index, pdfPathToOpen] of pdfPaths.entries()) {
+        await openPdfInTab(pdfPathToOpen, { activate: index === pdfPaths.length - 1 });
+      }
       if (pdfPaths.length > 1) {
-        showToast(tr("여러 PDF 중 첫 번째 파일만 열었습니다.", "Opened only the first PDF from the drop."));
+        showToast(
+          tr(
+            `${pdfPaths.length}개 PDF를 탭으로 열었습니다.`,
+            `Opened ${pdfPaths.length} PDFs in tabs.`,
+          ),
+        );
       }
       return;
     }
@@ -1695,30 +2294,28 @@ function App() {
       }
       await handleDroppedImagesOnPreview(imagePaths, position);
     }
-  }, [handleDroppedImagesOnPreview, loadPdfFromPath, showToast, tr]);
+  }, [handleDroppedImagesOnPreview, openPdfInTab, showToast, tr]);
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
     const initialPath = searchParams.get("open");
     if (initialPath) {
-      void loadPdfFromPath(initialPath);
+      void openPdfInTab(initialPath, { activate: true });
     }
 
     // Tauri 환경에서만 추가 작업 수행
     if (isTauriRuntime()) {
-      void (async () => {
-        try {
-          const pendingPath = await invoke<string | null>("take_next_pending_pdf_path");
-          if (pendingPath) {
-            await loadPdfFromPath(pendingPath);
-          }
-        } catch {
-          // Ignore if command is temporarily unavailable.
-        }
-      })();
       let unlisten: (() => void) | null = null;
+      void invoke<string | null>("take_startup_pdf_path")
+        .then((startupPath) => {
+          if (initialPath || typeof startupPath !== "string" || startupPath.trim().length === 0) return;
+          void openPdfInTab(startupPath, { activate: true });
+        })
+        .catch(() => {
+          // Ignore startup path lookup failures.
+        });
       void listen<string>("pdf-open-request", (event) => {
-        void loadPdfFromPath(event.payload);
+        void openPdfInTab(event.payload, { activate: true });
       }).then((dispose) => {
         unlisten = dispose;
       });
@@ -1726,7 +2323,7 @@ function App() {
         if (unlisten) unlisten();
       };
     }
-  }, [loadPdfFromPath]);
+  }, [openPdfInTab]);
 
   useEffect(() => {
     // Tauri 환경에서만 드래그 앤 드롭 이벤트 리스너 등록
@@ -1753,6 +2350,77 @@ function App() {
       if (unlisten) unlisten();
     };
   }, [handleNativeFileDrop]);
+
+  useEffect(() => {
+    if (!isE2EMode) return;
+    const bridge: AppE2EBridge = {
+      openPdfFromUrl: async (url: string, title?: string) => {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Failed to fetch PDF fixture: ${response.status} ${response.statusText}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        return openPdfBytesInTab(bytes, {
+          activate: true,
+          path: url,
+          title,
+        });
+      },
+    };
+    window.__PDF_APP_E2E__ = bridge;
+    return () => {
+      delete window.__PDF_APP_E2E__;
+    };
+  }, [isE2EMode, openPdfBytesInTab]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      const previewHost = previewHostRef.current;
+      const isFullscreen = document.fullscreenElement === previewHost;
+      setIsPreviewFullscreen(isFullscreen);
+      if (!previewHost) return;
+      window.requestAnimationFrame(() => {
+        setPreviewSize({ width: previewHost.clientWidth, height: previewHost.clientHeight });
+        previewRenderGenerationRef.current += 1;
+      });
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (isPreviewFullscreen || pageCount === 0) return;
+    pendingSidebarSyncPageRef.current = activePage;
+    if (sidebarSyncTimerRef.current !== null) window.clearTimeout(sidebarSyncTimerRef.current);
+    sidebarSyncTimerRef.current = window.setTimeout(() => {
+      sidebarSyncTimerRef.current = null;
+      const targetPage = pendingSidebarSyncPageRef.current;
+      if (!targetPage) return;
+      if (sidebarTab === "thumbnails") {
+        const viewport = thumbViewportRef.current;
+        const pageIndex = pageOrderIndexMap[targetPage];
+        if (!viewport || pageIndex < 0) return;
+        const targetTop = pageIndex * THUMB_ITEM_HEIGHT;
+        const targetBottom = targetTop + THUMB_ITEM_HEIGHT;
+        const currentTop = viewport.scrollTop;
+        const currentBottom = currentTop + viewport.clientHeight;
+        if (targetTop >= currentTop && targetBottom <= currentBottom) return;
+        const nextTop = Math.max(0, targetTop - Math.max(0, Math.floor((viewport.clientHeight - THUMB_ITEM_HEIGHT) / 2)));
+        viewport.scrollTop = nextTop;
+        return;
+      }
+
+      const activeOutlineItem = outlinePanelMode === "edit"
+        ? outlineListRef.current?.querySelector<HTMLElement>(".outline-item.active")
+        : document.querySelector<HTMLElement>(".outline-view-item.active");
+      activeOutlineItem?.scrollIntoView({ block: "nearest" });
+    }, 140);
+
+    return () => {
+      if (sidebarSyncTimerRef.current !== null) {
+        window.clearTimeout(sidebarSyncTimerRef.current);
+        sidebarSyncTimerRef.current = null;
+      }
+    };
+  }, [activePage, isPreviewFullscreen, outlinePanelMode, pageCount, pageOrderIndexMap, sidebarTab]);
 
   const handleOpenAddPdfModal = useCallback(async () => {
     if (!pdfDoc || !pdfBytes || isBusy) return;
@@ -2098,9 +2766,13 @@ function App() {
 
   const handleClosePdf = useCallback(async () => {
     setErrorText(null);
+    if (activeTabId) {
+      await closeWorkspaceTab(activeTabId);
+      return;
+    }
     await resetPdfWorkspace();
     setStatus({ type: "ready" });
-  }, [resetPdfWorkspace]);
+  }, [activeTabId, closeWorkspaceTab, resetPdfWorkspace]);
 
   const togglePageSelection = useCallback((pageNumber: number) => {
     setSelectedPages((prev) => {
@@ -2192,6 +2864,20 @@ function App() {
   const openSearchBar = useCallback(() => {
     setShowSearchBar(true);
   }, []);
+
+  const togglePreviewFullscreen = useCallback(async () => {
+    const previewHost = previewHostRef.current;
+    if (!previewHost) return;
+    try {
+      if (document.fullscreenElement === previewHost) {
+        await document.exitFullscreen();
+      } else {
+        await previewHost.requestFullscreen();
+      }
+    } catch (error) {
+      setErrorText(`${tr("전체화면 전환 실패", "Failed to toggle fullscreen")}: ${formatError(error)}`);
+    }
+  }, [tr]);
 
   const closeSearchBar = useCallback(() => {
     setShowSearchBar(false);
@@ -2466,8 +3152,12 @@ function App() {
       : Array.from({ length: pageCount }, (_, index) => index + 1);
     const remainingPages = existingOrder.filter((value) => value !== pageNumber);
     if (remainingPages.length === 0) {
-      await resetPdfWorkspace();
-      setStatus({ type: "ready" });
+      if (activeTabId) {
+        await closeWorkspaceTab(activeTabId);
+      } else {
+        await resetPdfWorkspace();
+        setStatus({ type: "ready" });
+      }
       showToast(tr("마지막 페이지를 삭제하여 작업을 초기화했습니다.", "Deleted the last page and cleared the workspace."));
       return;
     }
@@ -2529,6 +3219,8 @@ function App() {
     pdfDoc,
     replacePdfDocument,
     resetPdfWorkspace,
+    activeTabId,
+    closeWorkspaceTab,
     revokeOverlayUrls,
     showToast,
     tr,
@@ -2607,7 +3299,7 @@ function App() {
       const outputBytes = await buildSelectedPdfBytes();
       await invoke("protect_pdf", {
         request: {
-          pdfBytes: Array.from(outputBytes),
+          pdfBytes: outputBytes,
           outputPath: targetPath,
           password,
           ownerPassword: null,
@@ -2712,7 +3404,10 @@ function App() {
         setSecurityModalError(tr("열 PDF 경로를 찾지 못했습니다.", "Could not find the PDF to open."));
         return;
       }
-      const didOpen = await loadPdfFromPath(pendingProtectedPdfPath, trimmedPassword);
+      const didOpen = await openPdfInTab(pendingProtectedPdfPath, {
+        activate: true,
+        password: trimmedPassword,
+      });
       if (didOpen) closePdfSecurityModal();
       return;
     }
@@ -2722,7 +3417,7 @@ function App() {
     closePdfSecurityModal,
     handleSaveProtectedPdf,
     handleUnprotectPdf,
-    loadPdfFromPath,
+    openPdfInTab,
     pendingProtectedPdfPath,
     securityConfirmPassword,
     securityModalMode,
@@ -2944,10 +3639,25 @@ function App() {
         void handleOpenPdf();
         return;
       }
+      if (ctrlOrMeta && !shift && /^[1-9]$/.test(key)) {
+        if (editable) return;
+        const tabIndex = Number.parseInt(key, 10) - 1;
+        const targetTab = workspaceTabs[tabIndex];
+        if (!targetTab) return;
+        event.preventDefault();
+        void switchToWorkspaceTab(targetTab.id);
+        return;
+      }
       if (ctrlOrMeta && !shift && key === "f") {
         if (!pdfDoc) return;
         event.preventDefault();
         openSearchBar();
+        return;
+      }
+      if (ctrlOrMeta && !shift && key === "l") {
+        if (!pdfDoc) return;
+        event.preventDefault();
+        void togglePreviewFullscreen();
         return;
       }
       if (ctrlOrMeta && shift && key === "o") {
@@ -3048,13 +3758,20 @@ function App() {
     rotateActivePage,
     selectedPageNumbers.length,
     showSearchBar,
+    switchToWorkspaceTab,
+    togglePreviewFullscreen,
+    workspaceTabs,
   ]);
 
   const loadPdfInfo = useCallback(async () => {
     if (!pdfDoc) return;
+    const token = pdfInfoLoadTokenRef.current + 1;
+    pdfInfoLoadTokenRef.current = token;
     setIsLoadingPdfInfo(true);
+    setPdfInfoLoadingText(tr("문서 정보를 읽는 중...", "Reading document info..."));
     try {
       const metadata = await pdfDoc.getMetadata();
+      if (pdfInfoLoadTokenRef.current !== token) return;
       const info = (metadata.info ?? {}) as Record<string, unknown>;
       const rawFields: Array<[string, unknown]> = [
         [tr("파일", "File"), pdfPath ?? "-"],
@@ -3074,50 +3791,84 @@ function App() {
           .filter(([, value]) => value !== undefined && value !== null && String(value).trim().length > 0)
           .map(([label, value]) => ({ label, value: String(value) })),
       );
+      setPdfInfoLoadingText(tr("폰트 목록을 스캔하는 중... 0%", "Scanning fonts... 0%"));
 
-      const fonts = new Set<string>();
+      const fonts = new Map<string, Set<number>>();
+      const registerFont = (rawName: unknown, pageNumber: number) => {
+        const displayName = normalizePdfFontDisplayName(rawName);
+        if (!displayName) return;
+        const pages = fonts.get(displayName) ?? new Set<number>();
+        pages.add(pageNumber);
+        fonts.set(displayName, pages);
+      };
       for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+        if (pdfInfoLoadTokenRef.current !== token) return;
         const page = await pdfDoc.getPage(pageNumber);
+        const operatorList = await page.getOperatorList();
+        const commonObjs = (page as PDFPageProxy & {
+          commonObjs?: {
+            get?: (key: string) => PdfJsCommonFontLike | undefined;
+          };
+        }).commonObjs;
+        operatorList.fnArray.forEach((fn, index) => {
+          if (fn !== OPS.setFont) return;
+          const fontRef = operatorList.argsArray[index]?.[0];
+          if (typeof fontRef !== "string") return;
+          registerFont(fontRef, pageNumber);
+          const fontObject = commonObjs?.get?.(fontRef);
+          registerFont(fontObject?.name, pageNumber);
+          registerFont(fontObject?.loadedName, pageNumber);
+          registerFont(fontObject?.fallbackName, pageNumber);
+          registerFont(fontObject?.systemFontInfo?.loadedName, pageNumber);
+          registerFont(fontObject?.systemFontInfo?.css, pageNumber);
+        });
         const textContent = await page.getTextContent();
         const styles = textContent.styles as Record<string, { fontFamily?: string }>;
         for (const item of textContent.items as Array<{ fontName?: string }>) {
           const fontName = item.fontName;
           const fontFamily = fontName ? styles[fontName]?.fontFamily : undefined;
-          const displayName = normalizeOutlineTitle(fontFamily ?? fontName ?? "");
-          if (displayName.length > 0) fonts.add(displayName);
+          registerFont(fontFamily, pageNumber);
+          registerFont(fontName, pageNumber);
+        }
+        const progressPercent = Math.round((pageNumber / pdfDoc.numPages) * 100);
+        setPdfInfoLoadingText(
+          tr(
+            `폰트 목록을 스캔하는 중... ${pageNumber}/${pdfDoc.numPages} (${progressPercent}%)`,
+            `Scanning fonts... ${pageNumber}/${pdfDoc.numPages} (${progressPercent}%)`,
+          ),
+        );
+        if (pageNumber % FONT_INFO_YIELD_EVERY_PAGES === 0) {
+          await new Promise<void>((resolve) => {
+            const handle = scheduleIdleTask(resolve, 120);
+            if (pdfInfoLoadTokenRef.current !== token) {
+              cancelIdleTask(handle);
+              resolve();
+            }
+          });
         }
       }
-      setPdfInfoFontNames(Array.from(fonts).sort((a, b) => a.localeCompare(b)));
+      if (pdfInfoLoadTokenRef.current !== token) return;
+      setPdfInfoFonts(
+        Array.from(fonts.entries())
+          .map(([name, pages]) => ({ name, pageCount: pages.size }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      );
     } catch (error) {
+      if (pdfInfoLoadTokenRef.current !== token) return;
       setErrorText(`${tr("PDF 정보 로딩 실패", "Failed to load PDF info")}: ${formatError(error)}`);
     } finally {
-      setIsLoadingPdfInfo(false);
+      if (pdfInfoLoadTokenRef.current === token) {
+        setIsLoadingPdfInfo(false);
+        setPdfInfoLoadingText("");
+      }
     }
   }, [pdfDoc, pdfPath, tr]);
 
-  useEffect(() => {
-    hasPrefetchedPdfInfoRef.current = false;
-  }, [pdfDoc, pdfPath]);
-
-  useEffect(() => {
-    const thumbnailsReady = pageCount > 0 && Object.keys(thumbnailUrls).length >= pageCount;
-    const pagesReady = pageCount > 0 && pageOrder.length === pageCount && pendingHydrationPageCount === 0;
-    if (!pdfDoc || isLoadingPdf || isSaving || isAddingPdf || isLoadingPdfInfo || hasPrefetchedPdfInfoRef.current) return;
-    if (!pagesReady || !thumbnailsReady) return;
-    hasPrefetchedPdfInfoRef.current = true;
-    void loadPdfInfo();
-  }, [
-    isAddingPdf,
-    isLoadingPdf,
-    isLoadingPdfInfo,
-    isSaving,
-    loadPdfInfo,
-    pageCount,
-    pageOrder.length,
-    pdfDoc,
-    pendingHydrationPageCount,
-    thumbnailUrls,
-  ]);
+  const cancelPdfInfoLoading = useCallback(() => {
+    pdfInfoLoadTokenRef.current += 1;
+    setIsLoadingPdfInfo(false);
+    setPdfInfoLoadingText("");
+  }, []);
 
   const openPdfInfoModal = useCallback(() => {
     if (!pdfDoc || isBusy) return;
@@ -3125,6 +3876,25 @@ function App() {
     setShowPdfInfoModal(true);
     void loadPdfInfo();
   }, [isBusy, loadPdfInfo, pdfDoc]);
+
+  const handleCopyFontName = useCallback(async (fontName: string) => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(fontName);
+      showToast(tr(`폰트 이름을 복사했습니다: ${fontName}`, `Copied font name: ${fontName}`));
+    } catch {
+      await message(fontName, { title: tr("폰트 이름", "Font name") });
+    }
+  }, [showToast, tr]);
+
+  const handleSearchFontInfo = useCallback(async (fontName: string) => {
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${fontName} font`)}`;
+    try {
+      await openUrl(searchUrl);
+    } catch (error) {
+      setErrorText(`${tr("폰트 정보 검색 링크 열기 실패", "Failed to open font info search link")}: ${formatError(error)}`);
+    }
+  }, [tr]);
 
   const openProjectRepo = useCallback(async () => {
     try {
@@ -3145,6 +3915,32 @@ function App() {
   }), [previewPageSize.height, previewPageSize.width, previewSecondaryPageSize.height, previewSecondaryPageSize.width]);
   const addPdfLabel = useMemo(() => (addPdfPath ? normalizeFileStem(addPdfPath) : "-"), [addPdfPath]);
   const hasCurrentPdf = pdfDoc !== null;
+  const handleWorkspaceTabDragStart = useCallback((tabId: string, event: ReactDragEvent<HTMLDivElement>) => {
+    setDraggingWorkspaceTabId(tabId);
+    setWorkspaceTabDropTargetId(tabId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", tabId);
+  }, []);
+  const handleWorkspaceTabDragOver = useCallback((tabId: string, event: ReactDragEvent<HTMLDivElement>) => {
+    if (!draggingWorkspaceTabId || draggingWorkspaceTabId === tabId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (workspaceTabDropTargetId !== tabId) {
+      setWorkspaceTabDropTargetId(tabId);
+    }
+  }, [draggingWorkspaceTabId, workspaceTabDropTargetId]);
+  const handleWorkspaceTabDrop = useCallback((tabId: string, event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const sourceTabId = draggingWorkspaceTabId ?? event.dataTransfer.getData("text/plain");
+    if (!sourceTabId) return;
+    moveWorkspaceTab(sourceTabId, tabId);
+    setDraggingWorkspaceTabId(null);
+    setWorkspaceTabDropTargetId(null);
+  }, [draggingWorkspaceTabId, moveWorkspaceTab]);
+  const handleWorkspaceTabDragEnd = useCallback(() => {
+    setDraggingWorkspaceTabId(null);
+    setWorkspaceTabDropTargetId(null);
+  }, []);
   const handleMergeDragStart = useCallback((path: string, index: number) => {
     setMergeDraggingPath(path);
     setMergeDraggingIndex(index);
@@ -3307,6 +4103,24 @@ function App() {
             </div>
           </div>
         </div>
+        <WorkspaceTabStrip
+          tr={tr}
+          tabs={workspaceTabs}
+          activeTabId={activeTabId}
+          draggingTabId={draggingWorkspaceTabId}
+          dropTargetTabId={workspaceTabDropTargetId}
+          isBusy={isBusy}
+          onSwitchTab={(tabId) => {
+            void switchToWorkspaceTab(tabId);
+          }}
+          onCloseTab={(tabId) => {
+            void closeWorkspaceTab(tabId);
+          }}
+          onDragStartTab={handleWorkspaceTabDragStart}
+          onDragOverTab={handleWorkspaceTabDragOver}
+          onDropTab={handleWorkspaceTabDrop}
+          onDragEndTab={handleWorkspaceTabDragEnd}
+        />
 
         {!isToolbarCollapsed ? (
         <div className="panel toolbar-row">
@@ -3390,17 +4204,6 @@ function App() {
               </select>
             </label>
             <label className="inline-field">
-              <span>{tr("PDF 연결", "PDF association")}</span>
-              <select
-                value={openPdfInNewWindow ? "new" : "existing"}
-                onChange={(event) => setOpenPdfInNewWindow(event.currentTarget.value === "new")}
-                disabled={isBusy}
-              >
-                <option value="new">{tr("새창열기", "New window")}</option>
-                <option value="existing">{tr("기존창열기", "Existing window")}</option>
-              </select>
-            </label>
-            <label className="inline-field">
               <span>{tr("단축키", "Shortcuts")}</span>
               <select
                 value={showShortcuts ? "show" : "hide"}
@@ -3417,7 +4220,7 @@ function App() {
           <div className="action-group toolbar-block view-block">
             <button className="ghost-btn" onClick={() => { movePage(-1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage <= 1} title={withShortcutHint(tr("이전", "Previous"), showShortcuts ? SHORTCUT_LABELS.previousPage : undefined)}>{tr("이전", "Previous")}</button>
             <label className="inline-field page-field"><span>{tr("페이지", "Page")}</span>
-              <input value={pageInput} onChange={(event) => setPageInput(event.currentTarget.value)} onBlur={goToPage} onKeyDown={(event) => { if (event.key === "Enter") goToPage(); }} inputMode="numeric" disabled={!pdfDoc || isBusy} />
+              <input data-testid="page-input" value={pageInput} onChange={(event) => setPageInput(event.currentTarget.value)} onBlur={goToPage} onKeyDown={(event) => { if (event.key === "Enter") goToPage(); }} inputMode="numeric" disabled={!pdfDoc || isBusy} />
             </label>
             <button className="ghost-btn" onClick={() => { goToPage(); focusPreviewArea(); }} disabled={!pdfDoc || isBusy}>{tr("이동", "Go")}</button>
             <button className="ghost-btn" onClick={() => { movePage(1); focusPreviewArea(); }} disabled={!pdfDoc || isBusy || activePage >= pageCount} title={withShortcutHint(tr("다음", "Next"), showShortcuts ? SHORTCUT_LABELS.nextPage : undefined)}>{tr("다음", "Next")}</button>
@@ -3468,6 +4271,26 @@ function App() {
               >
                 <span className="btn-content"><ToolbarIcon name="doublePage" />{tr("두페이지씩", "2-Up")}</span>
               </button>
+              <button
+                className={`ghost-btn mini-btn ${isPreviewFullscreen ? "tab-active" : ""}`}
+                onClick={() => {
+                  void togglePreviewFullscreen();
+                  focusPreviewArea();
+                }}
+                disabled={!pdfDoc || isBusy}
+                type="button"
+                title={withShortcutHint(
+                  isPreviewFullscreen
+                    ? tr("본문 전체화면 종료", "Exit preview fullscreen")
+                    : tr("본문 전체화면", "Preview fullscreen"),
+                  showShortcuts ? SHORTCUT_LABELS.togglePreviewFullscreen : undefined,
+                )}
+              >
+                <span className="btn-content">
+                  <ToolbarIcon name="fullscreen" />
+                  {isPreviewFullscreen ? tr("전체화면 종료", "Exit Fullscreen") : tr("전체화면", "Fullscreen")}
+                </span>
+              </button>
             </label>
             <button
               className="ghost-btn"
@@ -3499,7 +4322,12 @@ function App() {
       <main className={`workspace ${showAiPanel ? "with-ai" : ""}`}>
         <aside className="panel sidebar">
           <div className="sidebar-head">
-            <strong>{pdfPath ? normalizeFileStem(pdfPath) : tr("불러온 PDF 없음", "No PDF loaded")}</strong>
+            <strong
+              className="sidebar-title"
+              title={pdfPath ? normalizeFileStem(pdfPath) : tr("불러온 PDF 없음", "No PDF loaded")}
+            >
+              {pdfPath ? normalizeFileStem(pdfPath) : tr("불러온 PDF 없음", "No PDF loaded")}
+            </strong>
             <div className="sidebar-tab-row">
               <button
                 className={`ghost-btn micro-btn ${sidebarTab === "thumbnails" ? "tab-active" : ""}`}
@@ -3826,7 +4654,7 @@ function App() {
           )}
         </aside>
 
-        <section className="panel preview-panel" ref={previewHostRef}>
+        <section className="panel preview-panel" ref={previewHostRef} data-testid="preview-panel">
           {pdfDoc ? (
             <>
               <div
@@ -3991,6 +4819,7 @@ function App() {
                       layerRef={previewTextLayerRef}
                     />
                     <div className="preview-overlay-layer">
+                      {renderPreviewLinkNodes(activePreviewLinks, primaryPreviewViewportRef.current)}
                       {renderPreviewOverlayNodes(activePageOverlays, primaryPreviewViewportRef.current)}
                     </div>
                   </div>
@@ -4005,6 +4834,7 @@ function App() {
                     >
                       <canvas ref={previewCanvasSecondaryRef} />
                       <div className="preview-overlay-layer">
+                        {renderPreviewLinkNodes(secondaryPreviewLinks, secondaryPreviewViewportRef.current)}
                         {renderPreviewOverlayNodes(secondaryPageOverlays, secondaryPreviewViewportRef.current)}
                       </div>
                     </div>
@@ -4053,10 +4883,21 @@ function App() {
         tr={tr}
         activeTab={pdfInfoTab}
         onChangeTab={setPdfInfoTab}
-        onClose={() => setShowPdfInfoModal(false)}
+        onClose={() => {
+          cancelPdfInfoLoading();
+          setShowPdfInfoModal(false);
+        }}
         isLoading={isLoadingPdfInfo}
+        loadingText={pdfInfoLoadingText}
+        onCancelLoading={cancelPdfInfoLoading}
         metadataFields={pdfInfoMetadataFields}
-        fontNames={pdfInfoFontNames}
+        fonts={pdfInfoFonts}
+        onCopyFontName={(fontName) => {
+          void handleCopyFontName(fontName);
+        }}
+        onSearchFontInfo={(fontName) => {
+          void handleSearchFontInfo(fontName);
+        }}
       />
 
       <PdfSecurityModal

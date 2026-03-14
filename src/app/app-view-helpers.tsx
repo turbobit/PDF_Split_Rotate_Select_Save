@@ -6,6 +6,7 @@ export type ToolbarIconName =
   | "add"
   | "merge"
   | "close"
+  | "fullscreen"
   | "print"
   | "apply"
   | "selectAll"
@@ -37,6 +38,8 @@ export function ToolbarIcon({ name }: { name: ToolbarIconName }) {
       return <svg {...commonProps}><path d="M3 4.5h3.5L8 6l1.5-1.5H13" /><path d="M3 11.5h3.5L8 10l1.5 1.5H13" /><path d="M8 6v4" /></svg>;
     case "close":
       return <svg {...commonProps}><path d="M3.5 3.5l9 9" /><path d="M12.5 3.5l-9 9" /></svg>;
+    case "fullscreen":
+      return <svg {...commonProps}><path d="M6 2.5H2.5V6" /><path d="M10 2.5h3.5V6" /><path d="M2.5 10V13.5H6" /><path d="M13.5 10v3.5H10" /></svg>;
     case "print":
       return <svg {...commonProps}><path d="M4.5 6V3.5h7V6" /><path d="M4 11.5H3a1.5 1.5 0 0 1-1.5-1.5V8A1.5 1.5 0 0 1 3 6.5h10A1.5 1.5 0 0 1 14.5 8v2A1.5 1.5 0 0 1 13 11.5h-1" /><path d="M4.5 9.5h7V13h-7z" /></svg>;
     case "apply":
@@ -76,6 +79,7 @@ export const SHORTCUT_LABELS = {
   rotateLeft: "Ctrl+[",
   rotateRight: "Ctrl+]",
   findInDocument: "Ctrl+F",
+  togglePreviewFullscreen: "Ctrl+L",
 } as const;
 
 export function withShortcutHint(label: string, shortcut?: string): string {
@@ -122,6 +126,14 @@ export type PdfImageOverlay = {
 };
 
 export type PdfPageOverlay = PdfImageOverlay;
+export type PreviewLinkOverlay = {
+  id: string;
+  pageNumber: number;
+  rect: PdfRect;
+  kind: "internal" | "external";
+  targetPageNumber?: number;
+  url?: string;
+};
 export type PdfSecurityMode = "protect" | "unprotect" | "open";
 
 export function normalizePdfRect(rect: PdfRect): PdfRect {

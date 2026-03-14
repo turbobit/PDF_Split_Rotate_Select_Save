@@ -12,10 +12,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
+use std::sync::Once;
 use std::time::Duration;
-use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
+use tauri::AppHandle;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_window_state::Builder as WindowStateBuilder;
 
@@ -33,18 +33,16 @@ const EMBEDDING_BATCH_SIZE: usize = 16;
 
 static SQLITE_VEC_REGISTER: Once = Once::new();
 
-#[derive(Default)]
-struct PendingPdfPaths {
-    queue: Mutex<Vec<String>>,
-}
-
 struct AppState {
     config_dir: PathBuf,
     database_path: PathBuf,
     http: reqwest::Client,
 }
 
-static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
+#[derive(Default)]
+struct StartupPdfPath {
+    path: Mutex<Option<String>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,7 +227,8 @@ struct UnprotectPdfRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InspectPdfSecurityRequest {
-    pdf_bytes: Vec<u8>,
+    pdf_bytes: Option<Vec<u8>>,
+    input_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -347,31 +346,6 @@ fn ensure_pdf_file_id(document: &mut LoDocument, pdf_bytes: &[u8]) {
     );
 }
 
-fn enqueue_pdf_paths(state: &State<'_, PendingPdfPaths>, paths: Vec<String>) {
-    if paths.is_empty() {
-        return;
-    }
-    if let Ok(mut queue) = state.queue.lock() {
-        queue.extend(paths);
-    }
-}
-
-fn create_main_like_window(app: &AppHandle) {
-    let label = format!("main-{}", WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed));
-    let _ = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
-        .title("PDF 자르고 추기하고 돌려고 선택하여 저장하기")
-        .inner_size(800.0, 600.0)
-        .build();
-}
-
-fn load_open_in_new_window_setting(app: &AppHandle) -> bool {
-    app.try_state::<AppState>()
-        .and_then(|state| load_settings_bundle_inner(&*state).ok())
-        .and_then(|bundle| bundle.settings.get("app.openPdfInNewWindow").cloned())
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true)
-}
-
 fn emit_pdf_open_request_to_existing_window(app: &AppHandle, path: &str) -> bool {
     for (label, window) in app.webview_windows().iter() {
         if label == "main" || label.starts_with("main-") {
@@ -384,33 +358,25 @@ fn emit_pdf_open_request_to_existing_window(app: &AppHandle, path: &str) -> bool
     false
 }
 
+fn store_startup_pdf_path(state: &StartupPdfPath, path: String) {
+    if let Ok(mut slot) = state.path.lock() {
+        *slot = Some(path);
+    }
+}
+
+fn take_startup_pdf_path_inner(state: &StartupPdfPath) -> Option<String> {
+    state.path.lock().ok().and_then(|mut slot| slot.take())
+}
+
 fn dispatch_pdf_open_request(app: &AppHandle, paths: Vec<String>) {
     if paths.is_empty() {
         return;
     }
 
-    if load_open_in_new_window_setting(app) {
-        let state = app.state::<PendingPdfPaths>();
-        enqueue_pdf_paths(&state, paths.clone());
-
-        let has_main_window = app
-            .webview_windows()
-            .keys()
-            .any(|label| label == "main" || label.starts_with("main-"));
-        if !has_main_window {
-            return;
-        }
-
-        for _ in paths {
-            create_main_like_window(app);
-        }
-        return;
-    }
-
     if let Some(first_path) = paths.first() {
         if !emit_pdf_open_request_to_existing_window(app, first_path) {
-            let state = app.state::<PendingPdfPaths>();
-            enqueue_pdf_paths(&state, vec![first_path.clone()]);
+            let state = app.state::<StartupPdfPath>();
+            store_startup_pdf_path(&state, first_path.clone());
         }
     }
 }
@@ -859,8 +825,7 @@ fn load_saved_api_key_anywhere(
 }
 
 fn load_settings_bundle_inner(state: &AppState) -> anyhow::Result<SettingsBundle> {
-    let mut conn = open_database(&state.database_path)?;
-    ensure_default_endpoints(&mut conn)?;
+    let conn = open_database(&state.database_path)?;
 
     let mut settings = HashMap::new();
     let mut stmt = conn.prepare("SELECT key, value_json FROM app_settings ORDER BY key")?;
@@ -894,6 +859,11 @@ fn load_settings_bundle_inner(state: &AppState) -> anyhow::Result<SettingsBundle
         config_dir: state.config_dir.to_string_lossy().to_string(),
         database_path: state.database_path.to_string_lossy().to_string(),
     })
+}
+
+#[tauri::command]
+fn take_startup_pdf_path(state: State<'_, StartupPdfPath>) -> Option<String> {
+    take_startup_pdf_path_inner(&state)
 }
 
 fn save_settings_inner(state: &AppState, request: SaveSettingsRequest) -> anyhow::Result<()> {
@@ -2791,11 +2761,22 @@ fn unprotect_pdf_inner(request: UnprotectPdfRequest) -> anyhow::Result<()> {
 fn inspect_pdf_security_inner(
     request: InspectPdfSecurityRequest,
 ) -> anyhow::Result<InspectPdfSecurityResponse> {
-    if request.pdf_bytes.is_empty() {
-        return Err(anyhow!("pdf bytes are empty"));
-    }
-    let document = LoDocument::load_mem(&request.pdf_bytes)
-        .context("failed to parse PDF bytes for security inspection")?;
+    let document = if let Some(input_path) = request
+        .input_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        LoDocument::load(input_path)
+            .with_context(|| format!("failed to open PDF for security inspection: {input_path}"))?
+    } else {
+        let pdf_bytes = request
+            .pdf_bytes
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| anyhow!("pdf bytes are empty"))?;
+        LoDocument::load_mem(&pdf_bytes)
+            .context("failed to parse PDF bytes for security inspection")?
+    };
     Ok(InspectPdfSecurityResponse {
         is_encrypted: document.is_encrypted(),
     })
@@ -2844,19 +2825,6 @@ fn apply_pdf_text_edits_inner(
         pdf_bytes: buffer,
         applied_edits,
     })
-}
-
-#[tauri::command]
-fn take_next_pending_pdf_path(state: State<'_, PendingPdfPaths>) -> Option<String> {
-    if let Ok(mut queue) = state.queue.lock() {
-        if queue.is_empty() {
-            None
-        } else {
-            Some(queue.remove(0))
-        }
-    } else {
-        None
-    }
 }
 
 #[tauri::command]
@@ -2991,12 +2959,19 @@ pub fn run() {
     let (config_dir, database_path) =
         resolve_storage_paths().expect("failed to prepare config directory");
     initialize_secret_store();
-    if let Err(error) = open_database(&database_path) {
+    match open_database(&database_path) {
+        Ok(mut conn) => {
+            if let Err(error) = ensure_default_endpoints(&mut conn) {
+                eprintln!("failed to seed default endpoints: {error:#}");
+            }
+        }
+        Err(error) => {
         eprintln!("failed to initialize database: {error:#}");
+        }
     }
 
     tauri::Builder::default()
-        .manage(PendingPdfPaths::default())
+        .manage(StartupPdfPath::default())
         .manage(AppState {
             config_dir,
             database_path,
@@ -3006,7 +2981,7 @@ pub fn run() {
                 .expect("failed to build HTTP client"),
         })
         .invoke_handler(tauri::generate_handler![
-            take_next_pending_pdf_path,
+            take_startup_pdf_path,
             load_app_settings,
             save_app_settings,
             save_chat_session,
@@ -3025,9 +3000,10 @@ pub fn run() {
             apply_pdf_text_edits
         ])
         .setup(|app| {
-            let startup_paths = collect_pdf_paths(std::env::args_os().skip(1));
-            let state = app.state::<PendingPdfPaths>();
-            enqueue_pdf_paths(&state, startup_paths);
+            if let Some(path) = collect_pdf_paths(std::env::args_os().skip(1)).into_iter().next() {
+                let state = app.state::<StartupPdfPath>();
+                store_startup_pdf_path(&state, path);
+            }
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -3051,9 +3027,6 @@ pub fn run() {
                         .map(|path| path.to_string_lossy().to_string())
                         .collect::<Vec<_>>();
                     dispatch_pdf_open_request(_app, paths);
-                }
-                tauri::RunEvent::Reopen { .. } => {
-                    create_main_like_window(_app);
                 }
                 _ => {}
             }
