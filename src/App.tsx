@@ -228,6 +228,7 @@ function App() {
   const [pdfInfoFonts, setPdfInfoFonts] = useState<PdfFontInfo[]>([]);
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false);
   const [showAiPanel, setShowAiPanel] = useState(false);
+  const [isAiFeatureEnabled, setIsAiFeatureEnabled] = useState(false);
   const [aiPanelWidth, setAiPanelWidth] = useState(DEFAULT_AI_PANEL_WIDTH);
   const [hasHydratedStoredSettings, setHasHydratedStoredSettings] = useState(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
@@ -414,6 +415,7 @@ function App() {
     return Math.max(6, Math.min(14, 6 + spreadBonus + areaBonus + memoryBonus));
   }, [previewSize.height, previewSize.width, previewSpreadMode]);
   const isStackedWorkspace = workspaceViewportWidth <= STACKED_WORKSPACE_BREAKPOINT;
+  const isAiPanelEffectivelyOn = showAiPanel && isAiFeatureEnabled;
   const workspaceGridStyle = useMemo(() => {
     if (isStackedWorkspace) return undefined;
     if (showAiPanel) {
@@ -548,6 +550,7 @@ function App() {
         const storedOpenExplorerAfterSave = settings["app.openExplorerAfterSave"];
         const storedShowShortcuts = settings["app.showShortcuts"];
         const storedAiPanelOpen = settings["ai.panelOpen"];
+        const storedAiEnabled = settings["ai.enabled"];
         const storedAiPanelWidth = settings["ai.panelWidth"];
 
         if (storedLocale === "ko" || storedLocale === "en") setLocale(storedLocale);
@@ -566,6 +569,7 @@ function App() {
         if (typeof storedOpenExplorerAfterSave === "boolean") setOpenExplorerAfterSave(storedOpenExplorerAfterSave);
         if (typeof storedShowShortcuts === "boolean") setShowShortcuts(storedShowShortcuts);
         if (typeof storedAiPanelOpen === "boolean") setShowAiPanel(storedAiPanelOpen);
+        if (typeof storedAiEnabled === "boolean") setIsAiFeatureEnabled(storedAiEnabled);
         if (typeof storedAiPanelWidth === "number") {
           setAiPanelWidth(clampWorkspaceAiWidth(storedAiPanelWidth, window.innerWidth, typeof storedSidebarWidth === "number" ? storedSidebarWidth : sidebarWidth));
         }
@@ -4094,10 +4098,16 @@ function App() {
           </div>
           <div className="toolbar-head-actions">
             <button
-              className={`ghost-btn toolbar-toggle-btn ${showAiPanel ? "tab-active" : ""}`}
+              className={`ghost-btn toolbar-toggle-btn ${isAiPanelEffectivelyOn ? "tab-active" : ""}`}
               type="button"
               onClick={() => setShowAiPanel((prev) => !prev)}
-              title={showAiPanel ? tr("AI 대화창 닫기", "Hide AI chat") : tr("AI 대화창 열기", "Show AI chat")}
+              title={
+                showAiPanel
+                  ? (isAiFeatureEnabled
+                    ? tr("AI 대화창 닫기 (현재 ON)", "Hide AI chat (currently ON)")
+                    : tr("AI 대화창 닫기 (현재 OFF)", "Hide AI chat (currently OFF)"))
+                  : tr("AI 대화창 열기", "Show AI chat")
+              }
             >
               {tr("AI대화", "AI Chat")}
             </button>
@@ -4930,6 +4940,7 @@ function App() {
               pdfPath={pdfPath}
               isBusy={isBusy}
               canPrepareIndex={isInitialPreviewReady}
+              onEnabledChange={setIsAiFeatureEnabled}
               onJumpToCitation={handleJumpToAiCitation}
             />
           </Suspense>

@@ -48,6 +48,7 @@ type AiChatPanelProps = {
   pdfPath: string | null;
   isBusy: boolean;
   canPrepareIndex?: boolean;
+  onEnabledChange?: (enabled: boolean) => void;
   onJumpToCitation?: (snippet: RetrievedSnippet) => void;
 };
 
@@ -327,6 +328,7 @@ export default function AiChatPanel({
   pdfPath,
   isBusy,
   canPrepareIndex = true,
+  onEnabledChange,
   onJumpToCitation,
 }: AiChatPanelProps) {
   const [databasePath, setDatabasePath] = useState("");
@@ -413,7 +415,9 @@ export default function AiChatPanel({
             .map((endpoint) => endpoint.id);
           return initial.length > 0 ? initial : bundle.endpoints.slice(0, 1).map((endpoint) => endpoint.id);
         });
-        setAiEnabled(readBoolean(bundle.settings["ai.enabled"]) ?? false);
+        const nextAiEnabled = readBoolean(bundle.settings["ai.enabled"]) ?? false;
+        setAiEnabled(nextAiEnabled);
+        onEnabledChange?.(nextAiEnabled);
         const fallbackEndpoint = bundle.endpoints.find((endpoint) => endpoint.isDefault) ?? null;
         setSelectedEndpointId(storedEndpointId ?? fallbackEndpoint?.id ?? null);
         setSettingsLoaded(true);
@@ -425,7 +429,11 @@ export default function AiChatPanel({
     return () => {
       cancelled = true;
     };
-  }, [tr]);
+  }, [onEnabledChange, tr]);
+
+  useEffect(() => {
+    onEnabledChange?.(aiEnabled);
+  }, [aiEnabled, onEnabledChange]);
 
   useEffect(() => {
     if (endpoints.length === 0) {
