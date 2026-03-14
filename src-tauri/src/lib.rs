@@ -12,13 +12,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 use std::time::Duration;
-#[cfg(target_os = "macos")]
 use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_window_state::Builder as WindowStateBuilder;
 
 const CONFIG_DIR_NAME: &str = "PDF_Split_Rotate_Select_Save";
@@ -46,7 +44,6 @@ struct AppState {
     http: reqwest::Client,
 }
 
-#[cfg(target_os = "macos")]
 static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,14 +356,63 @@ fn enqueue_pdf_paths(state: &State<'_, PendingPdfPaths>, paths: Vec<String>) {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn create_main_like_window(app: &AppHandle) {
     let label = format!("main-{}", WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed));
     let _ = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title("PDF 자르고 추기하고 돌려고 선택하여 저장하기")
         .inner_size(800.0, 600.0)
-        .visible(false)
         .build();
+}
+
+fn load_open_in_new_window_setting(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .and_then(|state| load_settings_bundle_inner(&*state).ok())
+        .and_then(|bundle| bundle.settings.get("app.openPdfInNewWindow").cloned())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
+fn emit_pdf_open_request_to_existing_window(app: &AppHandle, path: &str) -> bool {
+    for (label, window) in app.webview_windows().iter() {
+        if label == "main" || label.starts_with("main-") {
+            let _ = window.show();
+            let _ = window.set_focus();
+            let _ = window.emit("pdf-open-request", path.to_string());
+            return true;
+        }
+    }
+    false
+}
+
+fn dispatch_pdf_open_request(app: &AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    if load_open_in_new_window_setting(app) {
+        let state = app.state::<PendingPdfPaths>();
+        enqueue_pdf_paths(&state, paths.clone());
+
+        let has_main_window = app
+            .webview_windows()
+            .keys()
+            .any(|label| label == "main" || label.starts_with("main-"));
+        if !has_main_window {
+            return;
+        }
+
+        for _ in paths {
+            create_main_like_window(app);
+        }
+        return;
+    }
+
+    if let Some(first_path) = paths.first() {
+        if !emit_pdf_open_request_to_existing_window(app, first_path) {
+            let state = app.state::<PendingPdfPaths>();
+            enqueue_pdf_paths(&state, vec![first_path.clone()]);
+        }
+    }
 }
 
 fn now_iso() -> String {
@@ -2987,17 +3033,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(
-            WindowStateBuilder::default()
-                .map_label(|label| {
-                    if label == "main" || label.starts_with("main-") {
-                        "main"
-                    } else {
-                        label
-                    }
-                })
-                .build(),
-        )
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let paths = collect_pdf_paths(argv.into_iter().skip(1).map(OsString::from));
+            dispatch_pdf_open_request(app, paths);
+        }))
+        .plugin(WindowStateBuilder::default().build())
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
@@ -3010,29 +3050,7 @@ pub fn run() {
                         .filter(|path| is_pdf_path(path))
                         .map(|path| path.to_string_lossy().to_string())
                         .collect::<Vec<_>>();
-                    if paths.is_empty() {
-                        return;
-                    }
-                    let open_in_new_window = _app
-                        .try_state::<AppState>()
-                        .and_then(|state| load_settings_bundle_inner(&*state).ok())
-                        .and_then(|bundle| bundle.settings.get("app.openPdfInNewWindow"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true);
-                    if open_in_new_window {
-                        let state = _app.state::<PendingPdfPaths>();
-                        enqueue_pdf_paths(&state, paths.clone());
-                        for _ in paths {
-                            create_main_like_window(_app);
-                        }
-                    } else if let Some(first_path) = paths.first() {
-                        for (label, window) in _app.webview_windows().iter() {
-                            if label == "main" || label.starts_with("main-") {
-                                let _ = window.emit("pdf-open-request", first_path);
-                                break;
-                            }
-                        }
-                    }
+                    dispatch_pdf_open_request(_app, paths);
                 }
                 tauri::RunEvent::Reopen { .. } => {
                     create_main_like_window(_app);
